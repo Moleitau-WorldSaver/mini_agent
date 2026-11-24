@@ -246,11 +246,18 @@ function fromAsyncIterable(lines: AsyncIterable<string>): LineSource {
 }
 
 function readlineSource(): LineSource {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const terminal = process.stdin.isTTY === true;
+  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal });
+  const iterator = rl[Symbol.asyncIterator]();
   return {
     async next() {
+      if (terminal) {
+        rl.setPrompt('你> ');
+        rl.prompt();
+      }
       try {
-        return await rl.question('你> ');
+        const result = await iterator.next();
+        return result.done ? null : result.value;
       } catch {
         return null;
       }
