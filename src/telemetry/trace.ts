@@ -71,6 +71,17 @@ function toRecord(event: RuntimeEvent): Record<string, unknown> {
         steps: event.steps,
         reason: event.reason,
       };
+    case 'compression':
+      return {
+        turnId: event.turnId,
+        step: event.step,
+        kind: event.fallback ? 'compression_fallback' : 'compression',
+        removedMessages: event.removedMessages,
+        keptMessages: event.keptMessages,
+        summaryChars: event.summaryChars,
+        durationMs: event.durationMs,
+        error: event.error,
+      };
   }
 }
 

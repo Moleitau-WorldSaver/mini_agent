@@ -25,6 +25,7 @@ export const USAGE = [
   '  agent --session w1             恢复或新建会话 w1',
   '  agent "问题"                   单次提问',
   '  agent --verbose "问题"         显示思考过程',
+  '  agent --no-compress            关闭上下文压缩',
   '  agent --help                   查看帮助',
   '',
   '环境变量：DEEPSEEK_API_KEY（必填）、DEEPSEEK_MODEL、DEEPSEEK_BASE_URL 等，详见 README。',
@@ -41,6 +42,7 @@ export const REPL_HELP = [
 interface ParsedArgs {
   help: boolean;
   verbose: boolean;
+  noCompress: boolean;
   sessionId?: string;
   question: string;
 }
@@ -63,7 +65,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
     return 2;
   }
 
-  const { help, verbose, sessionId, question } = parsed.args;
+  const { help, verbose, noCompress, sessionId, question } = parsed.args;
   if (help) {
     out(USAGE);
     return 0;
@@ -81,9 +83,9 @@ export async function runCli(deps: CliDeps): Promise<number> {
 
   try {
     if (question) {
-      return await runOneShot(deps, question, verbose, out, err);
+      return await runOneShot(deps, question, verbose, noCompress, out, err);
     }
-    return await runReplMode(deps, sessionId, verbose, out, err);
+    return await runReplMode(deps, sessionId, verbose, noCompress, out, err);
   } catch (error) {
     err(`请求失败：${error instanceof Error ? error.message : String(error)}`);
     return 1;
@@ -94,6 +96,7 @@ async function runOneShot(
   deps: CliDeps,
   question: string,
   verbose: boolean,
+  noCompress: boolean,
   out: (line: string) => void,
   err: (line: string) => void,
 ): Promise<number> {
@@ -106,6 +109,9 @@ async function runOneShot(
     system: deps.system,
     maxSteps: deps.config.maxSteps,
     maxTokens: deps.config.maxTokens,
+    contextTokens: deps.config.contextTokens,
+    keepRecent: deps.config.keepRecent,
+    compression: !noCompress,
     tools: new ToolRegistry(createDefaultTools()),
     onEvent: (event) => {
       printEvent(event, out);
@@ -124,6 +130,7 @@ async function runReplMode(
   deps: CliDeps,
   sessionId: string | undefined,
   verbose: boolean,
+  noCompress: boolean,
   out: (line: string) => void,
   err: (line: string) => void,
 ): Promise<number> {
@@ -148,6 +155,9 @@ async function runReplMode(
     system: deps.system,
     maxSteps: deps.config.maxSteps,
     maxTokens: deps.config.maxTokens,
+    contextTokens: deps.config.contextTokens,
+    keepRecent: deps.config.keepRecent,
+    compression: !noCompress,
     tools: new ToolRegistry(createDefaultTools()),
     onSessionUpdated: (current) => saveSession(deps.config.dataDir, current),
     onEvent: async (event) => {
@@ -206,6 +216,7 @@ function parseArgs(argv: string[]): ParseResult {
   const rest: string[] = [];
   let help = false;
   let verbose = false;
+  let noCompress = false;
   let sessionId: string | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -214,6 +225,8 @@ function parseArgs(argv: string[]): ParseResult {
       help = true;
     } else if (arg === '--verbose') {
       verbose = true;
+    } else if (arg === '--no-compress') {
+      noCompress = true;
     } else if (arg === '--session') {
       const value = argv[index + 1];
       if (!value) {
@@ -230,7 +243,7 @@ function parseArgs(argv: string[]): ParseResult {
     }
   }
 
-  return { ok: true, args: { help, verbose, sessionId, question: rest.join(' ').trim() } };
+  return { ok: true, args: { help, verbose, noCompress, sessionId, question: rest.join(' ').trim() } };
 }
 
 function newSessionId(now = new Date()): string {

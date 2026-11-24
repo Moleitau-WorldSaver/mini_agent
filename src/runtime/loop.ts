@@ -1,6 +1,14 @@
 import type { ModelAdapter } from '../model/adapter.js';
-import type { ContextMessage, ModelResponse, Session, ToolCall, ToolResult, ToolSchema } from '../types.js';
+import type { ModelResponse, Session, ToolCall, ToolResult, ToolSchema } from '../types.js';
 import { applyTitle, touchSession } from '../session/session.js';
+import {
+  buildSystemPrompt,
+  compressionTriggered,
+  countContextChars,
+  estimateTokens,
+  findCompressionCut,
+  summarizeMessages,
+} from './context.js';
 
 export interface ToolExecutor {
   schemas(): ToolSchema[];
@@ -25,13 +33,27 @@ export type RuntimeEvent =
       step: number;
       error: { name: string; message: string; status?: number; retryable?: boolean };
     }
-  | { type: 'turn_end'; turnId: string; steps: number; reason: TurnEndReason };
+  | { type: 'turn_end'; turnId: string; steps: number; reason: TurnEndReason }
+  | {
+      type: 'compression';
+      turnId: string;
+      step: number;
+      removedMessages: number;
+      keptMessages: number;
+      summaryChars: number;
+      durationMs: number;
+      fallback: boolean;
+      error?: string;
+    };
 
 export interface RuntimeOptions {
   system: string;
   maxSteps: number;
   maxTokens: number;
   tools?: ToolExecutor;
+  contextTokens?: number;
+  keepRecent?: number;
+  compression?: boolean;
   onSessionUpdated?: (session: Session) => Promise<void> | void;
   onEvent?: (event: RuntimeEvent) => Promise<void> | void;
 }
@@ -64,12 +86,17 @@ export class AgentRuntime {
 
     try {
       for (step = 1; step <= this.options.maxSteps; step += 1) {
+        if (this.options.compression !== false) {
+          await this.compressIfNeeded(session, turnId, step);
+        }
+
+        const system = buildSystemPrompt(this.options.system, session.summary);
         const requestMessages = [...session.messages];
         const toolSchemas = this.options.tools?.schemas() ?? [];
         const startedAt = Date.now();
 
         const response = await this.adapter.complete({
-          system: this.options.system,
+          system,
           messages: requestMessages,
           tools: toolSchemas,
           thinking: session.thinking,
@@ -86,7 +113,7 @@ export class AgentRuntime {
             messageCount: requestMessages.length,
             toolCount: toolSchemas.length,
             thinking: session.thinking,
-            contextChars: countContextChars(this.options.system, requestMessages, toolSchemas),
+            contextChars: countContextChars(system, requestMessages, toolSchemas),
           },
           response,
         });
@@ -177,6 +204,60 @@ export class AgentRuntime {
     }
   }
 
+  private async compressIfNeeded(session: Session, turnId: string, step: number): Promise<void> {
+    const toolSchemas = this.options.tools?.schemas() ?? [];
+    const system = buildSystemPrompt(this.options.system, session.summary);
+    const tokens = estimateTokens(system, session.messages, toolSchemas);
+    if (!compressionTriggered(tokens, session.messages.length, this.options.contextTokens ?? 32768)) {
+      return;
+    }
+
+    const cut = findCompressionCut(session.messages, this.options.keepRecent ?? 8);
+    if (cut <= 0) {
+      return;
+    }
+
+    const removed = session.messages.slice(0, cut);
+    const startedAt = Date.now();
+
+    try {
+      const summary = await summarizeMessages({
+        adapter: this.adapter,
+        oldSummary: session.summary,
+        removed,
+      });
+      session.summary = summary;
+      session.messages.splice(0, cut);
+      touchSession(session);
+      await this.persist(session);
+      await this.emit({
+        type: 'compression',
+        turnId,
+        step,
+        removedMessages: cut,
+        keptMessages: session.messages.length,
+        summaryChars: summary.length,
+        durationMs: Date.now() - startedAt,
+        fallback: false,
+      });
+    } catch (error) {
+      session.messages.splice(0, cut);
+      touchSession(session);
+      await this.persist(session);
+      await this.emit({
+        type: 'compression',
+        turnId,
+        step,
+        removedMessages: cut,
+        keptMessages: session.messages.length,
+        summaryChars: session.summary?.length ?? 0,
+        durationMs: Date.now() - startedAt,
+        fallback: true,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private async executeTool(call: ToolCall, session: Session): Promise<ToolResult> {
     if (!this.options.tools) {
       return {
@@ -198,22 +279,4 @@ export class AgentRuntime {
       await this.options.onEvent(event);
     }
   }
-}
-
-function countContextChars(system: string, messages: ContextMessage[], tools: ToolSchema[]): number {
-  let total = system.length + tools.length * 200;
-  for (const message of messages) {
-    if (message.role === 'tool') {
-      total += message.content.length;
-    } else if (message.role === 'assistant') {
-      total += message.content?.length ?? 0;
-      total += message.reasoningContent?.length ?? 0;
-      for (const call of message.toolCalls ?? []) {
-        total += call.arguments.length;
-      }
-    } else {
-      total += message.content.length;
-    }
-  }
-  return total;
 }
