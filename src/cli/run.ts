@@ -29,6 +29,7 @@ export const USAGE = [
   '  agent --list                   列出会话',
   '  agent "问题"                   单次提问',
   '  agent --verbose "问题"         显示思考过程',
+  '  agent --no-think               新会话关闭思考模式',
   '  agent --no-compress            关闭上下文压缩',
   '  agent --help                   查看帮助',
   '',
@@ -48,6 +49,7 @@ export const REPL_HELP = [
 interface ParsedArgs {
   help: boolean;
   verbose: boolean;
+  noThink: boolean;
   noCompress: boolean;
   listSessions: boolean;
   sessionId?: string;
@@ -78,7 +80,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
     return 2;
   }
 
-  const { help, verbose, noCompress, listSessions, sessionId, question } = parsed.args;
+  const { help, verbose, noThink, noCompress, listSessions, sessionId, question } = parsed.args;
   if (help) {
     out(USAGE);
     return 0;
@@ -107,9 +109,9 @@ export async function runCli(deps: CliDeps): Promise<number> {
 
   try {
     if (question) {
-      return await runOneShot(deps, question, verbose, noCompress, out, err);
+      return await runOneShot(deps, question, verbose, noThink, noCompress, out, err);
     }
-    return await runReplMode(deps, sessionId, verbose, noCompress, out, err);
+    return await runReplMode(deps, sessionId, verbose, noThink, noCompress, out, err);
   } catch (error) {
     if (error instanceof SessionLockError) {
       err(error.message);
@@ -128,6 +130,7 @@ async function runOneShot(
   deps: CliDeps,
   question: string,
   verbose: boolean,
+  noThink: boolean,
   noCompress: boolean,
   out: (line: string) => void,
   err: (line: string) => void,
@@ -135,7 +138,7 @@ async function runOneShot(
   const session = createSession({
     id: 'oneshot',
     model: deps.config.model,
-    thinking: deps.config.thinking,
+    thinking: deps.config.thinking && !noThink,
   });
   const runtime = new AgentRuntime(deps.createAdapter(session.model), {
     system: deps.system,
@@ -162,14 +165,16 @@ async function runReplMode(
   deps: CliDeps,
   sessionId: string | undefined,
   verbose: boolean,
+  noThink: boolean,
   noCompress: boolean,
   out: (line: string) => void,
   err: (line: string) => void,
 ): Promise<number> {
+  const effectiveThinking = deps.config.thinking && !noThink;
   const manager = new SessionManager({
     dataDir: deps.config.dataDir,
     model: deps.config.model,
-    thinking: deps.config.thinking,
+    thinking: effectiveThinking,
     onWarning: err,
   });
 
@@ -178,7 +183,7 @@ async function runReplMode(
 
   try {
     const opened = await manager.open(id);
-    if (!opened.created && opened.session.thinking !== deps.config.thinking) {
+    if (!opened.created && opened.session.thinking !== effectiveThinking) {
       err(`提示：会话 ${opened.session.id} 记录为思考模式${opened.session.thinking ? '开启' : '关闭'}，沿用会话设置。`);
     }
 
@@ -341,6 +346,7 @@ function parseArgs(argv: string[]): ParseResult {
   const rest: string[] = [];
   let help = false;
   let verbose = false;
+  let noThink = false;
   let noCompress = false;
   let listSessions = false;
   let sessionId: string | undefined;
@@ -351,6 +357,8 @@ function parseArgs(argv: string[]): ParseResult {
       help = true;
     } else if (arg === '--verbose') {
       verbose = true;
+    } else if (arg === '--no-think') {
+      noThink = true;
     } else if (arg === '--no-compress') {
       noCompress = true;
     } else if (arg === '--list') {
@@ -373,7 +381,7 @@ function parseArgs(argv: string[]): ParseResult {
 
   return {
     ok: true,
-    args: { help, verbose, noCompress, listSessions, sessionId, question: rest.join(' ').trim() },
+    args: { help, verbose, noThink, noCompress, listSessions, sessionId, question: rest.join(' ').trim() },
   };
 }
 

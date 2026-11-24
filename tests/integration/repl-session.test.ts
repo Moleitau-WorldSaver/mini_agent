@@ -161,6 +161,27 @@ describe('REPL and session persistence', () => {
     }
   });
 
+  it('creates new sessions with thinking off when --no-think is passed', async () => {
+    const dir = await makeTempDir();
+    try {
+      const fake = new FakeLLM([{ kind: 'text', content: '好' }]);
+      await runCli({
+        argv: ['--session', 'w6', '--no-think'],
+        config: configFor(dir),
+        system: 'SYS',
+        createAdapter: () => fake,
+        lines: linesOf('你好'),
+        ...captureIO(),
+      });
+
+      expect(fake.requests[0]!.thinking).toBe(false);
+      const saved = await readJsonFile<{ thinking: boolean }>(path.join(dir, 'sessions', 'w6.json'));
+      expect(saved.thinking).toBe(false);
+    } finally {
+      await removeDir(dir);
+    }
+  });
+
   it('reports a cancelled turn, keeps the REPL alive, and traces cancellation', async () => {
     const dir = await makeTempDir();
     try {
