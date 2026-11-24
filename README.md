@@ -194,7 +194,7 @@ npm run typecheck
 
 - [设计文档](docs/design.md)
 - [测试计划](docs/test-plan.md)
-- [AI Prompt 与问题解决记录](AI-PROMPT-AND-TROUBLESHOOTING.md)
+- [AI 开发过程记录：提示词、工作流与问题排查](AI-PROMPT-AND-TROUBLESHOOTING.md)
 - [词汇表](GLOSSARY.md)
 - [ADR-0001：原生工具调用](docs/adr/0001-native-tool-calling.md)
 - [ADR-0002：思考模式与 Context](docs/adr/0002-thinking-and-context.md)
