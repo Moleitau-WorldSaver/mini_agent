@@ -1,0 +1,22 @@
+{
+  "name": "mini-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal agent runtime built from scratch",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "tsx": "^4",
+    "typescript": "^5",
+    "vitest": "^3"
+  }
+}
