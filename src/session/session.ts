@@ -2,6 +2,12 @@ import type { Session } from '../types.js';
 
 export const UNTITLED_TITLE = '未命名会话';
 
+const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
+
+export function isValidSessionId(id: string): boolean {
+  return SESSION_ID_PATTERN.test(id);
+}
+
 export interface CreateSessionOptions {
   id: string;
   model: string;

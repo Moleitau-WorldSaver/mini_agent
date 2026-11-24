@@ -62,18 +62,4 @@ describe('runCli (one-shot)', () => {
     expect(code).toBe(0);
     expect(io.err.join('\n')).toContain('这是思考');
   });
-
-  it('prints usage when no question is given', async () => {
-    const io = capture();
-    const code = await runCli({
-      argv: [],
-      config: loadConfig({ DEEPSEEK_API_KEY: 'test-key' }),
-      system: 'SYS',
-      createAdapter: () => new FakeLLM([]),
-      ...io,
-    });
-
-    expect(code).toBe(2);
-    expect(io.err.join('\n')).toContain('用法');
-  });
 });

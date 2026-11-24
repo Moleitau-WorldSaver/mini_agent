@@ -1,45 +1,68 @@
+import { createInterface } from 'node:readline/promises';
 import type { Config } from '../config.js';
 import type { ModelAdapter } from '../model/adapter.js';
 import { AgentRuntime } from '../runtime/loop.js';
-import { createSession } from '../session/session.js';
+import { createSession, isValidSessionId } from '../session/session.js';
+import { loadSession, saveSession } from '../session/store.js';
+import { TraceWriter, traceFilePath } from '../telemetry/trace.js';
 
 export interface CliDeps {
   argv: string[];
   config: Config;
   system: string;
-  createAdapter: () => ModelAdapter;
+  createAdapter: (model: string) => ModelAdapter;
+  lines?: AsyncIterable<string>;
   stdout?: (line: string) => void;
   stderr?: (line: string) => void;
 }
 
 export const USAGE = [
   '用法：',
-  '  agent "问题"                 单次提问',
-  '  agent --verbose "问题"       显示思考过程',
-  '  agent --help                 查看帮助',
+  '  agent                          进入交互式会话',
+  '  agent --session w1             恢复或新建会话 w1',
+  '  agent "问题"                   单次提问',
+  '  agent --verbose "问题"         显示思考过程',
+  '  agent --help                   查看帮助',
   '',
   '环境变量：DEEPSEEK_API_KEY（必填）、DEEPSEEK_MODEL、DEEPSEEK_BASE_URL 等，详见 README。',
 ].join('\n');
 
+export const REPL_HELP = [
+  '可用命令：',
+  '  /help    显示帮助',
+  '  /exit    退出（也可用 /quit）',
+  '直接输入文字即可对话。',
+].join('\n');
+
+interface ParsedArgs {
+  help: boolean;
+  verbose: boolean;
+  sessionId?: string;
+  question: string;
+}
+
+type ParseResult = { ok: true; args: ParsedArgs } | { ok: false; error: string };
+
+interface LineSource {
+  next(): Promise<string | null>;
+  close(): void;
+}
+
 export async function runCli(deps: CliDeps): Promise<number> {
   const out = deps.stdout ?? ((line: string) => console.log(line));
   const err = deps.stderr ?? ((line: string) => console.error(line));
-  const args = deps.argv;
 
-  if (args.includes('--help') || args.includes('-h')) {
-    out(USAGE);
-    return 0;
-  }
-
-  const verbose = args.includes('--verbose');
-  const question = args
-    .filter((arg) => !arg.startsWith('-'))
-    .join(' ')
-    .trim();
-
-  if (!question) {
+  const parsed = parseArgs(deps.argv);
+  if (!parsed.ok) {
+    err(parsed.error);
     err(USAGE);
     return 2;
+  }
+
+  const { help, verbose, sessionId, question } = parsed.args;
+  if (help) {
+    out(USAGE);
+    return 0;
   }
 
   if (!deps.config.apiKey) {
@@ -47,27 +70,183 @@ export async function runCli(deps: CliDeps): Promise<number> {
     return 1;
   }
 
+  if (sessionId !== undefined && !isValidSessionId(sessionId)) {
+    err(`会话 id 不合法：${sessionId}。只能使用 1–32 位字母、数字、下划线或连字符。`);
+    return 2;
+  }
+
+  try {
+    if (question) {
+      return await runOneShot(deps, question, verbose, out, err);
+    }
+    return await runReplMode(deps, sessionId, verbose, out, err);
+  } catch (error) {
+    err(`请求失败：${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
+}
+
+async function runOneShot(
+  deps: CliDeps,
+  question: string,
+  verbose: boolean,
+  out: (line: string) => void,
+  err: (line: string) => void,
+): Promise<number> {
   const session = createSession({
     id: 'oneshot',
     model: deps.config.model,
     thinking: deps.config.thinking,
   });
-  const runtime = new AgentRuntime(deps.createAdapter(), {
+  const runtime = new AgentRuntime(deps.createAdapter(session.model), {
     system: deps.system,
     maxSteps: deps.config.maxSteps,
     maxTokens: deps.config.maxTokens,
   });
 
-  try {
-    const result = await runtime.runTurn(session, question);
-    if (verbose && result.reasoningContent) {
-      err(`[思考] ${result.reasoningContent}`);
-    }
-    out(result.content);
-    return 0;
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    err(`请求失败：${detail}`);
-    return 1;
+  const result = await runtime.runTurn(session, question);
+  if (verbose && result.reasoningContent) {
+    err(`[思考] ${result.reasoningContent}`);
   }
+  out(result.content);
+  return 0;
+}
+
+async function runReplMode(
+  deps: CliDeps,
+  sessionId: string | undefined,
+  verbose: boolean,
+  out: (line: string) => void,
+  err: (line: string) => void,
+): Promise<number> {
+  const id = sessionId ?? newSessionId();
+  const existing = await loadSession(deps.config.dataDir, id);
+  const session =
+    existing ??
+    createSession({
+      id,
+      model: deps.config.model,
+      thinking: deps.config.thinking,
+    });
+
+  if (existing) {
+    if (session.thinking !== deps.config.thinking) {
+      err(`提示：会话 ${id} 记录为思考模式${session.thinking ? '开启' : '关闭'}，沿用会话设置。`);
+    }
+  }
+
+  const trace = new TraceWriter(traceFilePath(deps.config.dataDir, id), (message) => err(message));
+  const runtime = new AgentRuntime(deps.createAdapter(session.model), {
+    system: deps.system,
+    maxSteps: deps.config.maxSteps,
+    maxTokens: deps.config.maxTokens,
+    onSessionUpdated: (current) => saveSession(deps.config.dataDir, current),
+    onEvent: (event) => trace.write(id, event),
+  });
+
+  out(`会话 ${id}（${existing ? '已恢复' : '新建'}）`);
+
+  const source = deps.lines ? fromAsyncIterable(deps.lines) : readlineSource();
+  try {
+    while (true) {
+      const line = await source.next();
+      if (line === null) {
+        break;
+      }
+      const input = line.trim();
+      if (!input) {
+        continue;
+      }
+      if (input === '/exit' || input === '/quit') {
+        break;
+      }
+      if (input === '/help') {
+        out(REPL_HELP);
+        continue;
+      }
+      if (input.startsWith('/')) {
+        out(`未知命令：${input}。输入 /help 查看可用命令。`);
+        continue;
+      }
+
+      try {
+        const result = await runtime.runTurn(session, input);
+        if (verbose && result.reasoningContent) {
+          err(`[思考] ${result.reasoningContent}`);
+        }
+        out(`助手> ${result.content}`);
+      } catch (error) {
+        err(`请求失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  } finally {
+    source.close();
+  }
+
+  return 0;
+}
+
+function parseArgs(argv: string[]): ParseResult {
+  const rest: string[] = [];
+  let help = false;
+  let verbose = false;
+  let sessionId: string | undefined;
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]!;
+    if (arg === '--help' || arg === '-h') {
+      help = true;
+    } else if (arg === '--verbose') {
+      verbose = true;
+    } else if (arg === '--session') {
+      const value = argv[index + 1];
+      if (!value) {
+        return { ok: false, error: '--session 需要一个值' };
+      }
+      sessionId = value;
+      index += 1;
+    } else if (arg.startsWith('--session=')) {
+      sessionId = arg.slice('--session='.length);
+    } else if (arg.startsWith('--')) {
+      return { ok: false, error: `未知参数：${arg}` };
+    } else {
+      rest.push(arg);
+    }
+  }
+
+  return { ok: true, args: { help, verbose, sessionId, question: rest.join(' ').trim() } };
+}
+
+function newSessionId(now = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `s-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
+function fromAsyncIterable(lines: AsyncIterable<string>): LineSource {
+  const iterator = lines[Symbol.asyncIterator]();
+  return {
+    async next() {
+      const result = await iterator.next();
+      return result.done ? null : result.value;
+    },
+    close() {
+      void iterator.return?.();
+    },
+  };
+}
+
+function readlineSource(): LineSource {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return {
+    async next() {
+      try {
+        return await rl.question('你> ');
+      } catch {
+        return null;
+      }
+    },
+    close() {
+      rl.close();
+    },
+  };
 }

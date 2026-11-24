@@ -10,11 +10,11 @@ const code = await runCli({
   argv: process.argv.slice(2),
   config,
   system,
-  createAdapter: () =>
+  createAdapter: (model) =>
     new DeepSeekAdapter({
       apiKey: config.apiKey ?? '',
       baseUrl: config.baseUrl,
-      model: config.model,
+      model,
     }),
 });
 
