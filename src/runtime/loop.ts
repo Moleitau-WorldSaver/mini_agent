@@ -1,6 +1,7 @@
 import type { ModelAdapter } from '../model/adapter.js';
-import type { ModelResponse, Session, ToolCall, ToolResult, ToolSchema } from '../types.js';
+import type { ModelRequest, ModelResponse, Session, ToolCall, ToolResult, ToolSchema } from '../types.js';
 import { applyTitle, touchSession } from '../session/session.js';
+import { TurnCancelledError } from './errors.js';
 import {
   buildSystemPrompt,
   compressionTriggered,
@@ -15,7 +16,7 @@ export interface ToolExecutor {
   execute(call: ToolCall, session: Session): Promise<ToolResult>;
 }
 
-export type TurnEndReason = 'final' | 'max_steps' | 'error';
+export type TurnEndReason = 'final' | 'max_steps' | 'error' | 'length' | 'cancelled';
 
 export type RuntimeEvent =
   | {
@@ -34,6 +35,7 @@ export type RuntimeEvent =
       error: { name: string; message: string; status?: number; retryable?: boolean };
     }
   | { type: 'turn_end'; turnId: string; steps: number; reason: TurnEndReason }
+  | { type: 'cancelled'; turnId: string; step: number }
   | {
       type: 'compression';
       turnId: string;
@@ -74,7 +76,7 @@ export class AgentRuntime {
     this.options = options;
   }
 
-  async runTurn(session: Session, input: string): Promise<TurnResult> {
+  async runTurn(session: Session, input: string, options: { signal?: AbortSignal } = {}): Promise<TurnResult> {
     const turnId = `turn-${++session.turnSeq}`;
     applyTitle(session, input);
     session.messages.push({ role: 'user', content: input, turnId });
@@ -86,6 +88,9 @@ export class AgentRuntime {
 
     try {
       for (step = 1; step <= this.options.maxSteps; step += 1) {
+        if (options.signal?.aborted) {
+          throw new TurnCancelledError();
+        }
         if (this.options.compression !== false) {
           await this.compressIfNeeded(session, turnId, step);
         }
@@ -95,13 +100,18 @@ export class AgentRuntime {
         const toolSchemas = this.options.tools?.schemas() ?? [];
         const startedAt = Date.now();
 
-        const response = await this.adapter.complete({
-          system,
-          messages: requestMessages,
-          tools: toolSchemas,
-          thinking: session.thinking,
-          maxTokens: this.options.maxTokens,
-        });
+        const response = await this.callModel(
+          {
+            system,
+            messages: requestMessages,
+            tools: toolSchemas,
+            thinking: session.thinking,
+            maxTokens: this.options.maxTokens,
+            signal: options.signal,
+          },
+          turnId,
+          step,
+        );
         lastReasoning = response.reasoningContent;
 
         await this.emit({
@@ -118,6 +128,27 @@ export class AgentRuntime {
           response,
         });
 
+        if (response.finishReason === 'length') {
+          if (response.toolCalls.length > 0) {
+            throw new Error('模型输出在工具调用中途被截断');
+          }
+          const partial = response.content ?? '';
+          session.messages.push({
+            role: 'assistant',
+            content: partial,
+            reasoningContent: response.reasoningContent,
+            turnId,
+            step,
+          });
+          touchSession(session);
+          await this.persist(session);
+          await this.emit({ type: 'turn_end', turnId, steps: step, reason: 'length' });
+          const notice = partial
+            ? `${partial}\n\n（输出达到长度上限，已截断）`
+            : '（输出达到长度上限，已截断）';
+          return { content: notice, steps: step, finishReason: 'length', reasoningContent: lastReasoning };
+        }
+
         if (response.toolCalls.length > 0) {
           session.messages.push({
             role: 'assistant',
@@ -128,7 +159,25 @@ export class AgentRuntime {
             step,
           });
 
-          for (const call of response.toolCalls) {
+          for (let callIndex = 0; callIndex < response.toolCalls.length; callIndex += 1) {
+            if (options.signal?.aborted) {
+              for (const pending of response.toolCalls.slice(callIndex)) {
+                session.messages.push({
+                  role: 'tool',
+                  toolCallId: pending.id,
+                  name: pending.name,
+                  content: JSON.stringify({ error: '已取消' }),
+                  isError: true,
+                  turnId,
+                  step,
+                });
+              }
+              touchSession(session);
+              await this.persist(session);
+              throw new TurnCancelledError();
+            }
+
+            const call = response.toolCalls[callIndex]!;
             const toolStartedAt = Date.now();
             const result = await this.executeTool(call, session);
             await this.emit({
@@ -187,6 +236,13 @@ export class AgentRuntime {
         reasoningContent: lastReasoning,
       };
     } catch (error) {
+      const cancelled = error instanceof TurnCancelledError || options.signal?.aborted === true;
+      if (cancelled) {
+        await this.emit({ type: 'cancelled', turnId, step: Math.max(step, 1) });
+        await this.emit({ type: 'turn_end', turnId, steps: step, reason: 'cancelled' });
+        throw error instanceof TurnCancelledError ? error : new TurnCancelledError();
+      }
+
       const detail = error as { name?: string; message?: string; status?: number; retryable?: boolean };
       await this.emit({
         type: 'error',
@@ -202,6 +258,27 @@ export class AgentRuntime {
       await this.emit({ type: 'turn_end', turnId, steps: step, reason: 'error' });
       throw error;
     }
+  }
+
+  private async callModel(request: ModelRequest, turnId: string, step: number): Promise<ModelResponse> {
+    let response = await this.adapter.complete(request);
+    if (!isEmptyResponse(response)) {
+      return response;
+    }
+
+    await this.emit({
+      type: 'error',
+      turnId,
+      step,
+      error: { name: 'EmptyResponse', message: '模型返回空响应，重试一次', retryable: true },
+    });
+
+    response = await this.adapter.complete(request);
+    if (!isEmptyResponse(response)) {
+      return response;
+    }
+
+    throw new Error('模型返回了空响应');
   }
 
   private async compressIfNeeded(session: Session, turnId: string, step: number): Promise<void> {
@@ -279,4 +356,8 @@ export class AgentRuntime {
       await this.options.onEvent(event);
     }
   }
+}
+
+function isEmptyResponse(response: ModelResponse): boolean {
+  return response.toolCalls.length === 0 && (response.content === null || response.content.trim() === '');
 }

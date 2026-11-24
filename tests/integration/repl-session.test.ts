@@ -2,6 +2,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli/run.js';
 import { loadConfig } from '../../src/config.js';
+import { TurnCancelledError } from '../../src/runtime/errors.js';
 import { FakeLLM } from '../fake-llm.js';
 import { captureIO, linesOf, makeTempDir, readJsonFile, readText, removeDir } from '../helpers.js';
 
@@ -155,6 +156,38 @@ describe('REPL and session persistence', () => {
       expect(code).toBe(0);
       expect(io.out.join('\n')).toContain('/exit');
       expect(fake.requests).toHaveLength(0);
+    } finally {
+      await removeDir(dir);
+    }
+  });
+
+  it('reports a cancelled turn, keeps the REPL alive, and traces cancellation', async () => {
+    const dir = await makeTempDir();
+    try {
+      const fake = new FakeLLM([
+        { kind: 'throw', error: new TurnCancelledError() },
+        { kind: 'text', content: '继续成功' },
+      ]);
+      const io = captureIO();
+
+      const code = await runCli({
+        argv: ['--session', 'w5'],
+        config: configFor(dir),
+        system: 'SYS',
+        createAdapter: () => fake,
+        lines: linesOf('问题', '继续'),
+        ...io,
+      });
+
+      expect(code).toBe(0);
+      expect(io.err.join('\n')).toContain('已取消');
+      expect(io.out.join('\n')).toContain('继续成功');
+
+      const kinds = (await readText(path.join(dir, 'traces', 'w5.jsonl')))
+        .trim()
+        .split('\n')
+        .map((line) => (JSON.parse(line) as { kind: string }).kind);
+      expect(kinds).toContain('cancelled');
     } finally {
       await removeDir(dir);
     }

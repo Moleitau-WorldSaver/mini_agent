@@ -82,6 +82,12 @@ function toRecord(event: RuntimeEvent): Record<string, unknown> {
         durationMs: event.durationMs,
         error: event.error,
       };
+    case 'cancelled':
+      return {
+        turnId: event.turnId,
+        step: event.step,
+        kind: 'cancelled',
+      };
   }
 }
 

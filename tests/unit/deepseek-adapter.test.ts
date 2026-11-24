@@ -159,37 +159,45 @@ describe('DeepSeekAdapter', () => {
   });
 
   it('turns non-retryable HTTP failures into a readable ModelError', async () => {
-    const { impl } = fakeFetch([{ status: 401, text: '{"error":{"message":"invalid key"}}' }]);
+    const { impl, calls } = fakeFetch([{ status: 401, text: '{"error":{"message":"invalid key"}}' }]);
     const adapter = new DeepSeekAdapter({
       apiKey: 'bad-key',
       baseUrl: 'https://example.test',
       model: 'deepseek-flash',
       fetchImpl: impl,
+      sleep: async () => {},
     });
 
-    await expect(
-      adapter.complete({ system: 's', messages: [], tools: [], thinking: true, maxTokens: 10 }),
-    ).rejects.toMatchObject({
-      name: 'ModelError',
-      status: 401,
-      retryable: false,
-    });
-    await expect(
-      adapter.complete({ system: 's', messages: [], tools: [], thinking: true, maxTokens: 10 }),
-    ).rejects.toBeInstanceOf(ModelError);
+    const error = await adapter
+      .complete({ system: 's', messages: [], tools: [], thinking: true, maxTokens: 10 })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ModelError);
+    expect(error).toMatchObject({ status: 401, retryable: false });
+    expect(calls).toHaveLength(1);
   });
 
   it('marks 429 retryable and parses Retry-After', async () => {
-    const { impl } = fakeFetch([{ status: 429, headers: { 'retry-after': '3' }, text: 'rate limited' }]);
+    const sleeps: number[] = [];
+    const { impl, calls } = fakeFetch([
+      { status: 429, headers: { 'retry-after': '3' }, text: 'rate limited' },
+      { status: 429, headers: { 'retry-after': '3' }, text: 'rate limited' },
+      { status: 429, headers: { 'retry-after': '3' }, text: 'rate limited' },
+    ]);
     const adapter = new DeepSeekAdapter({
       apiKey: 'k',
       baseUrl: 'https://example.test',
       model: 'deepseek-flash',
       fetchImpl: impl,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
     });
 
     await expect(
       adapter.complete({ system: 's', messages: [], tools: [], thinking: true, maxTokens: 10 }),
     ).rejects.toMatchObject({ status: 429, retryable: true, retryAfterMs: 3000 });
+    expect(calls).toHaveLength(3);
+    expect(sleeps).toEqual([3000, 3000]);
   });
 });

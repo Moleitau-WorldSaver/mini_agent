@@ -2,6 +2,7 @@ import { createInterface } from 'node:readline/promises';
 import type { Config } from '../config.js';
 import type { ModelAdapter } from '../model/adapter.js';
 import { AgentRuntime, type RuntimeEvent } from '../runtime/loop.js';
+import { TurnCancelledError } from '../runtime/errors.js';
 import { createSession, isValidSessionId } from '../session/session.js';
 import { loadSession, saveSession } from '../session/store.js';
 import { TraceWriter, traceFilePath } from '../telemetry/trace.js';
@@ -52,6 +53,7 @@ type ParseResult = { ok: true; args: ParsedArgs } | { ok: false; error: string }
 interface LineSource {
   next(): Promise<string | null>;
   close(): void;
+  onInterrupt?: (handler: () => void) => () => void;
 }
 
 export async function runCli(deps: CliDeps): Promise<number> {
@@ -169,6 +171,15 @@ async function runReplMode(
   out(`会话 ${id}（${existing ? '已恢复' : '新建'}）`);
 
   const source = deps.lines ? fromAsyncIterable(deps.lines) : readlineSource();
+  let activeController: AbortController | null = null;
+  const detachInterrupt = source.onInterrupt?.(() => {
+    if (activeController) {
+      activeController.abort();
+      return;
+    }
+    source.close();
+  });
+
   try {
     while (true) {
       const line = await source.next();
@@ -195,17 +206,26 @@ async function runReplMode(
         continue;
       }
 
+      const controller = new AbortController();
+      activeController = controller;
       try {
-        const result = await runtime.runTurn(session, input);
+        const result = await runtime.runTurn(session, input, { signal: controller.signal });
         if (verbose && result.reasoningContent) {
           err(`[思考] ${result.reasoningContent}`);
         }
         out(`助手> ${result.content}`);
       } catch (error) {
-        err(`请求失败：${error instanceof Error ? error.message : String(error)}`);
+        if (error instanceof TurnCancelledError) {
+          err('已取消当前轮次。');
+        } else {
+          err(`请求失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+      } finally {
+        activeController = null;
       }
     }
   } finally {
+    detachInterrupt?.();
     source.close();
   }
 
@@ -283,6 +303,12 @@ function readlineSource(): LineSource {
     },
     close() {
       rl.close();
+    },
+    onInterrupt(handler: () => void) {
+      rl.on('SIGINT', handler);
+      return () => {
+        rl.off('SIGINT', handler);
+      };
     },
   };
 }

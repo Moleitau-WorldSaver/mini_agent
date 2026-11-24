@@ -32,6 +32,7 @@ export interface DeepSeekOptions {
   baseUrl: string;
   model: string;
   fetchImpl?: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 interface WireToolCall {
@@ -61,15 +62,32 @@ export class DeepSeekAdapter implements ModelAdapter {
   private readonly baseUrl: string;
   private readonly model: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(options: DeepSeekOptions) {
     this.apiKey = options.apiKey;
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.model = options.model;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   async complete(req: ModelRequest): Promise<ModelResponse> {
+    const maxAttempts = 3;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.attempt(req);
+      } catch (error) {
+        if (!(error instanceof ModelError) || !error.retryable || attempt >= maxAttempts) {
+          throw error;
+        }
+        const delay = error.retryAfterMs ?? (attempt === 1 ? 1000 : 2000);
+        await this.sleep(delay);
+      }
+    }
+  }
+
+  private async attempt(req: ModelRequest): Promise<ModelResponse> {
     const body = this.buildBody(req);
     let response: Response;
     try {
