@@ -61,6 +61,19 @@ describe('compression cut', () => {
     expect(messages.slice(cut).some((message) => message.role === 'tool')).toBe(false);
   });
 
+  it('cuts at the next user boundary when one turn exceeds keepRecent', () => {
+    const messages: ContextMessage[] = [user('u1')];
+    for (let index = 0; index < 8; index += 1) {
+      messages.push(assistant(`a${index}`));
+    }
+    messages.push(user('u2'), assistant('a9'));
+
+    const cut = findCompressionCut(messages, 3);
+
+    expect(cut).toBe(9);
+    expect(messages[cut]?.role).toBe('user');
+  });
+
   it('refuses to cut when no safe user boundary exists', () => {
     const messages = [assistant('a1'), tool('c1'), assistant('a2')];
     expect(findCompressionCut(messages, 1)).toBe(0);

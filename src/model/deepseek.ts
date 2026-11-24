@@ -1,5 +1,6 @@
 import type { ModelAdapter } from './adapter.js';
 import type { ContextMessage, ModelRequest, ModelResponse, ModelUsage } from '../types.js';
+import { truncate } from '../text.js';
 
 export type ModelErrorKind = 'http' | 'network' | 'protocol' | 'aborted';
 
@@ -32,7 +33,7 @@ export interface DeepSeekOptions {
   baseUrl: string;
   model: string;
   fetchImpl?: typeof fetch;
-  sleep?: (ms: number) => Promise<void>;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 interface WireToolCall {
@@ -62,14 +63,14 @@ export class DeepSeekAdapter implements ModelAdapter {
   private readonly baseUrl: string;
   private readonly model: string;
   private readonly fetchImpl: typeof fetch;
-  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
 
   constructor(options: DeepSeekOptions) {
     this.apiKey = options.apiKey;
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.model = options.model;
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.sleep = options.sleep ?? abortableSleep;
   }
 
   async complete(req: ModelRequest): Promise<ModelResponse> {
@@ -82,7 +83,15 @@ export class DeepSeekAdapter implements ModelAdapter {
           throw error;
         }
         const delay = error.retryAfterMs ?? (attempt === 1 ? 1000 : 2000);
-        await this.sleep(delay);
+        try {
+          await this.sleep(delay, req.signal);
+        } catch (sleepError) {
+          throw new ModelError('请求已取消', {
+            kind: 'aborted',
+            retryable: false,
+            cause: sleepError,
+          });
+        }
       }
     }
   }
@@ -109,7 +118,7 @@ export class DeepSeekAdapter implements ModelAdapter {
     }
 
     if (!response.ok) {
-      throw await this.httpError(response);
+      throw await this.toHttpError(response);
     }
 
     let json: WireResponse;
@@ -208,7 +217,7 @@ export class DeepSeekAdapter implements ModelAdapter {
     return wire;
   }
 
-  private async httpError(response: Response): Promise<ModelError> {
+  private async toHttpError(response: Response): Promise<ModelError> {
     const raw = await response.text().catch(() => '');
     const detail = extractErrorMessage(raw);
     const retryable = RETRYABLE_STATUS.has(response.status);
@@ -255,10 +264,6 @@ function extractErrorMessage(raw: string): string {
   return truncate(raw, 300);
 }
 
-function truncate(text: string, limit: number): string {
-  return text.length <= limit ? text : `${text.slice(0, limit)}…`;
-}
-
 export function parseRetryAfter(value: string | null): number | undefined {
   if (!value) {
     return undefined;
@@ -272,4 +277,21 @@ export function parseRetryAfter(value: string | null): number | undefined {
     return Math.max(0, date - Date.now());
   }
   return undefined;
+}
+
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new Error('aborted'));
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('aborted'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }

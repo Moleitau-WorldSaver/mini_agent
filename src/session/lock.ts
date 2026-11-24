@@ -1,4 +1,4 @@
-import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { sessionsDir } from './store.js';
 
@@ -24,7 +24,15 @@ export async function acquireLock(dataDir: string, id: string, staleMs: number):
         JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }),
         { encoding: 'utf8', flag: 'wx' },
       );
+
+      const heartbeat = setInterval(() => {
+        const now = new Date();
+        void utimes(file, now, now).catch(() => {});
+      }, Math.max(50, Math.floor(staleMs / 3)));
+      heartbeat.unref();
+
       return async () => {
+        clearInterval(heartbeat);
         await rm(file, { force: true });
       };
     } catch (error) {

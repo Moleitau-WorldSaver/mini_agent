@@ -1,5 +1,6 @@
 import type { ModelAdapter } from '../model/adapter.js';
 import type { ModelRequest, ModelResponse, Session, ToolCall, ToolResult, ToolSchema } from '../types.js';
+import { DEFAULT_CONTEXT_TOKENS, DEFAULT_KEEP_RECENT } from '../config.js';
 import { applyTitle, touchSession } from '../session/session.js';
 import { TurnCancelledError } from './errors.js';
 import {
@@ -32,10 +33,11 @@ export type RuntimeEvent =
       type: 'error';
       turnId: string;
       step: number;
+      durationMs: number;
       error: { name: string; message: string; status?: number; retryable?: boolean };
     }
-  | { type: 'turn_end'; turnId: string; steps: number; reason: TurnEndReason }
-  | { type: 'cancelled'; turnId: string; step: number }
+  | { type: 'turn_end'; turnId: string; steps: number; reason: TurnEndReason; durationMs: number }
+  | { type: 'cancelled'; turnId: string; step: number; durationMs: number }
   | {
       type: 'compression';
       turnId: string;
@@ -85,6 +87,8 @@ export class AgentRuntime {
 
     let lastReasoning: string | null = null;
     let step = 0;
+    const turnStartedAt = Date.now();
+    const executedTools: string[] = [];
 
     try {
       for (step = 1; step <= this.options.maxSteps; step += 1) {
@@ -92,7 +96,7 @@ export class AgentRuntime {
           throw new TurnCancelledError();
         }
         if (this.options.compression !== false) {
-          await this.compressIfNeeded(session, turnId, step);
+          await this.compressIfNeeded(session, turnId, step, options.signal);
         }
 
         const system = buildSystemPrompt(this.options.system, session.summary);
@@ -111,6 +115,7 @@ export class AgentRuntime {
           },
           turnId,
           step,
+          turnStartedAt,
         );
         lastReasoning = response.reasoningContent;
 
@@ -142,7 +147,13 @@ export class AgentRuntime {
           });
           touchSession(session);
           await this.persist(session);
-          await this.emit({ type: 'turn_end', turnId, steps: step, reason: 'length' });
+          await this.emit({
+            type: 'turn_end',
+            turnId,
+            steps: step,
+            reason: 'length',
+            durationMs: Date.now() - turnStartedAt,
+          });
           const notice = partial
             ? `${partial}\n\n（输出达到长度上限，已截断）`
             : '（输出达到长度上限，已截断）';
@@ -180,6 +191,7 @@ export class AgentRuntime {
             const call = response.toolCalls[callIndex]!;
             const toolStartedAt = Date.now();
             const result = await this.executeTool(call, session);
+            executedTools.push(call.name);
             await this.emit({
               type: 'tool',
               turnId,
@@ -214,11 +226,19 @@ export class AgentRuntime {
         });
         touchSession(session);
         await this.persist(session);
-        await this.emit({ type: 'turn_end', turnId, steps: step, reason: 'final' });
+        await this.emit({
+          type: 'turn_end',
+          turnId,
+          steps: step,
+          reason: 'final',
+          durationMs: Date.now() - turnStartedAt,
+        });
         return { content, steps: step, finishReason: response.finishReason, reasoningContent: lastReasoning };
       }
 
-      const notice = `（已达步数上限 ${this.options.maxSteps}，本轮停止。以上为已完成的进度。）`;
+      const notice = `（已达步数上限 ${this.options.maxSteps}，本轮停止。已执行工具：${
+        executedTools.length > 0 ? executedTools.join('、') : '无'
+      }。以上为已完成的进度。）`;
       session.messages.push({
         role: 'assistant',
         content: notice,
@@ -228,7 +248,13 @@ export class AgentRuntime {
       });
       touchSession(session);
       await this.persist(session);
-      await this.emit({ type: 'turn_end', turnId, steps: this.options.maxSteps, reason: 'max_steps' });
+      await this.emit({
+        type: 'turn_end',
+        turnId,
+        steps: this.options.maxSteps,
+        reason: 'max_steps',
+        durationMs: Date.now() - turnStartedAt,
+      });
       return {
         content: notice,
         steps: this.options.maxSteps,
@@ -238,8 +264,19 @@ export class AgentRuntime {
     } catch (error) {
       const cancelled = error instanceof TurnCancelledError || options.signal?.aborted === true;
       if (cancelled) {
-        await this.emit({ type: 'cancelled', turnId, step: Math.max(step, 1) });
-        await this.emit({ type: 'turn_end', turnId, steps: step, reason: 'cancelled' });
+        await this.emit({
+          type: 'cancelled',
+          turnId,
+          step: Math.max(step, 1),
+          durationMs: Date.now() - turnStartedAt,
+        });
+        await this.emit({
+          type: 'turn_end',
+          turnId,
+          steps: step,
+          reason: 'cancelled',
+          durationMs: Date.now() - turnStartedAt,
+        });
         throw error instanceof TurnCancelledError ? error : new TurnCancelledError();
       }
 
@@ -248,6 +285,7 @@ export class AgentRuntime {
         type: 'error',
         turnId,
         step: Math.max(step, 1),
+        durationMs: Date.now() - turnStartedAt,
         error: {
           name: detail.name ?? 'Error',
           message: detail.message ?? String(error),
@@ -255,12 +293,23 @@ export class AgentRuntime {
           retryable: detail.retryable,
         },
       });
-      await this.emit({ type: 'turn_end', turnId, steps: step, reason: 'error' });
+      await this.emit({
+        type: 'turn_end',
+        turnId,
+        steps: step,
+        reason: 'error',
+        durationMs: Date.now() - turnStartedAt,
+      });
       throw error;
     }
   }
 
-  private async callModel(request: ModelRequest, turnId: string, step: number): Promise<ModelResponse> {
+  private async callModel(
+    request: ModelRequest,
+    turnId: string,
+    step: number,
+    turnStartedAt: number,
+  ): Promise<ModelResponse> {
     let response = await this.adapter.complete(request);
     if (!isEmptyResponse(response)) {
       return response;
@@ -270,6 +319,7 @@ export class AgentRuntime {
       type: 'error',
       turnId,
       step,
+      durationMs: Date.now() - turnStartedAt,
       error: { name: 'EmptyResponse', message: '模型返回空响应，重试一次', retryable: true },
     });
 
@@ -281,15 +331,26 @@ export class AgentRuntime {
     throw new Error('模型返回了空响应');
   }
 
-  private async compressIfNeeded(session: Session, turnId: string, step: number): Promise<void> {
+  private async compressIfNeeded(
+    session: Session,
+    turnId: string,
+    step: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const toolSchemas = this.options.tools?.schemas() ?? [];
     const system = buildSystemPrompt(this.options.system, session.summary);
     const tokens = estimateTokens(system, session.messages, toolSchemas);
-    if (!compressionTriggered(tokens, session.messages.length, this.options.contextTokens ?? 32768)) {
+    if (
+      !compressionTriggered(
+        tokens,
+        session.messages.length,
+        this.options.contextTokens ?? DEFAULT_CONTEXT_TOKENS,
+      )
+    ) {
       return;
     }
 
-    const cut = findCompressionCut(session.messages, this.options.keepRecent ?? 8);
+    const cut = findCompressionCut(session.messages, this.options.keepRecent ?? DEFAULT_KEEP_RECENT);
     if (cut <= 0) {
       return;
     }
@@ -302,6 +363,7 @@ export class AgentRuntime {
         adapter: this.adapter,
         oldSummary: session.summary,
         removed,
+        signal,
       });
       session.summary = summary;
       session.messages.splice(0, cut);
@@ -318,6 +380,9 @@ export class AgentRuntime {
         fallback: false,
       });
     } catch (error) {
+      if (signal?.aborted) {
+        throw new TurnCancelledError();
+      }
       session.messages.splice(0, cut);
       touchSession(session);
       await this.persist(session);

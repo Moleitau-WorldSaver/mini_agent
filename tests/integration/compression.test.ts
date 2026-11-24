@@ -2,7 +2,9 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli/run.js';
 import { loadConfig } from '../../src/config.js';
+import type { ModelAdapter } from '../../src/model/adapter.js';
 import { AgentRuntime, type RuntimeEvent } from '../../src/runtime/loop.js';
+import { TurnCancelledError } from '../../src/runtime/errors.js';
 import { createSession } from '../../src/session/session.js';
 import { saveSession } from '../../src/session/store.js';
 import { TraceWriter, traceFilePath } from '../../src/telemetry/trace.js';
@@ -176,6 +178,49 @@ describe('context compression', () => {
     } finally {
       await removeDir(dir);
     }
+  });
+
+  it('cancels during summarization without dropping history', async () => {
+    const controller = new AbortController();
+    const adapter: ModelAdapter = {
+      complete(req) {
+        return new Promise((_, reject) => {
+          const onAbort = () => {
+            const error = new Error('aborted');
+            error.name = 'AbortError';
+            reject(error);
+          };
+          if (req.signal?.aborted) {
+            onAbort();
+          } else {
+            req.signal?.addEventListener('abort', onAbort, { once: true });
+          }
+          setTimeout(() => controller.abort(), 5);
+        });
+      },
+    };
+    const events: RuntimeEvent[] = [];
+    const runtime = new AgentRuntime(adapter, {
+      system: 'BASE',
+      maxSteps: 8,
+      maxTokens: 1024,
+      contextTokens: 50,
+      keepRecent: 4,
+      onEvent: (event) => {
+        events.push(event);
+      },
+    });
+    const session = longSession();
+    const before = session.messages.length;
+
+    await expect(
+      runtime.runTurn(session, '新问题', { signal: controller.signal }),
+    ).rejects.toBeInstanceOf(TurnCancelledError);
+
+    expect(session.summary).toBeNull();
+    expect(session.messages.length).toBe(before + 1);
+    expect(events.some((event) => event.type === 'cancelled')).toBe(true);
+    expect(events.some((event) => event.type === 'compression' && event.fallback)).toBe(false);
   });
 
   it('maps a failed compression event to a compression_fallback trace record', async () => {

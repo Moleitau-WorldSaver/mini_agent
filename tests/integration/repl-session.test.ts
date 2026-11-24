@@ -1,18 +1,9 @@
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli/run.js';
-import { loadConfig } from '../../src/config.js';
 import { TurnCancelledError } from '../../src/runtime/errors.js';
 import { FakeLLM } from '../fake-llm.js';
-import { captureIO, linesOf, makeTempDir, readJsonFile, readText, removeDir } from '../helpers.js';
-
-function configFor(dir: string, extra: NodeJS.ProcessEnv = {}) {
-  return loadConfig({
-    DEEPSEEK_API_KEY: 'secret-key-for-test',
-    MINI_AGENT_DATA_DIR: dir,
-    ...extra,
-  });
-}
+import { captureIO, linesOf, makeTempDir, readJsonFile, readText, removeDir, testConfig } from '../helpers.js';
 
 describe('REPL and session persistence', () => {
   it('persists a conversation and resumes it with history and reasoning', async () => {
@@ -25,7 +16,7 @@ describe('REPL and session persistence', () => {
       const io1 = captureIO();
       const code1 = await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => first,
         lines: linesOf('你好', '再见'),
@@ -44,7 +35,7 @@ describe('REPL and session persistence', () => {
       const io2 = captureIO();
       const code2 = await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => second,
         lines: linesOf('继续'),
@@ -66,7 +57,7 @@ describe('REPL and session persistence', () => {
       const io = captureIO();
       await runCli({
         argv: ['--session', 'w2'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => fake,
         lines: linesOf('问题'),
@@ -95,7 +86,7 @@ describe('REPL and session persistence', () => {
       const create = new FakeLLM([{ kind: 'text', content: '好' }]);
       await runCli({
         argv: ['--session', 'w3'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => create,
         lines: linesOf('你好'),
@@ -106,7 +97,7 @@ describe('REPL and session persistence', () => {
       const io = captureIO();
       const code = await runCli({
         argv: ['--session', 'w3'],
-        config: configFor(dir, { MINI_AGENT_THINKING: 'off' }),
+        config: testConfig(dir, { MINI_AGENT_THINKING: 'off' }),
         system: 'SYS',
         createAdapter: () => resume,
         lines: linesOf('继续'),
@@ -127,7 +118,7 @@ describe('REPL and session persistence', () => {
       const io = captureIO();
       const code = await runCli({
         argv: ['--session', '../escape'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => new FakeLLM([]),
         lines: linesOf(),
@@ -147,7 +138,7 @@ describe('REPL and session persistence', () => {
       const io = captureIO();
       const code = await runCli({
         argv: ['--session', 'w4'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => fake,
         lines: linesOf('/help', '/exit'),
@@ -167,7 +158,7 @@ describe('REPL and session persistence', () => {
       const fake = new FakeLLM([{ kind: 'text', content: '好' }]);
       await runCli({
         argv: ['--session', 'w6', '--no-think'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => fake,
         lines: linesOf('你好'),
@@ -193,7 +184,7 @@ describe('REPL and session persistence', () => {
 
       const code = await runCli({
         argv: ['--session', 'w5'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => fake,
         lines: linesOf('问题', '继续'),

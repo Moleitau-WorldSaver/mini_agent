@@ -1,5 +1,6 @@
 import type { ModelAdapter } from '../model/adapter.js';
 import type { ContextMessage, ToolSchema } from '../types.js';
+import { truncate } from '../text.js';
 
 const SUMMARY_SYSTEM_PROMPT =
   '你是对话摘要器。把给出的历史对话压缩成简洁、事实性的摘要，保留用户目标、约束、已完成的工具结果与待办状态。不要编造信息，只输出摘要正文。';
@@ -44,7 +45,14 @@ export function findCompressionCut(messages: ContextMessage[], keepRecent: numbe
   if (candidate === 0) {
     return 0;
   }
-  for (let index = candidate; index >= 0; index -= 1) {
+  for (let index = candidate; index > 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      return index;
+    }
+  }
+  // A single long turn may have no user boundary before the candidate; keep the
+  // current turn intact and cut at its first user message instead.
+  for (let index = candidate + 1; index < messages.length; index += 1) {
     if (messages[index]?.role === 'user') {
       return index;
     }
@@ -56,7 +64,6 @@ export interface SummarizeInput {
   adapter: ModelAdapter;
   oldSummary: string | null;
   removed: ContextMessage[];
-  maxTokens?: number;
   signal?: AbortSignal;
 }
 
@@ -71,7 +78,7 @@ export async function summarizeMessages(input: SummarizeInput): Promise<string> 
     messages: [{ role: 'user', content }],
     tools: [],
     thinking: false,
-    maxTokens: input.maxTokens ?? 1024,
+    maxTokens: 1024,
     signal: input.signal,
   });
 
@@ -85,20 +92,16 @@ export async function summarizeMessages(input: SummarizeInput): Promise<string> 
 function formatMessage(message: ContextMessage): string {
   switch (message.role) {
     case 'user':
-      return `用户：${truncateForSummary(message.content)}`;
+      return `用户：${truncate(message.content, SUMMARY_INPUT_LIMIT)}`;
     case 'assistant': {
       const calls = (message.toolCalls ?? [])
-        .map((call) => `[调用工具 ${call.name}(${truncateForSummary(call.arguments)})]`)
+        .map((call) => `[调用工具 ${call.name}(${truncate(call.arguments, SUMMARY_INPUT_LIMIT)})]`)
         .join(' ');
-      return `助手：${truncateForSummary(message.content ?? '')}${calls ? ` ${calls}` : ''}`;
+      return `助手：${truncate(message.content ?? '', SUMMARY_INPUT_LIMIT)}${calls ? ` ${calls}` : ''}`;
     }
     case 'tool':
-      return `工具 ${message.name} 结果${message.isError ? '（错误）' : ''}：${truncateForSummary(message.content)}`;
+      return `工具 ${message.name} 结果${message.isError ? '（错误）' : ''}：${truncate(message.content, SUMMARY_INPUT_LIMIT)}`;
     case 'system':
-      return `系统：${truncateForSummary(message.content)}`;
+      return `系统：${truncate(message.content, SUMMARY_INPUT_LIMIT)}`;
   }
-}
-
-function truncateForSummary(value: string): string {
-  return value.length <= SUMMARY_INPUT_LIMIT ? value : `${value.slice(0, SUMMARY_INPUT_LIMIT)}…`;
 }

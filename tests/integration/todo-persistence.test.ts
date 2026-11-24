@@ -1,17 +1,16 @@
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli/run.js';
-import { loadConfig } from '../../src/config.js';
 import { FakeLLM } from '../fake-llm.js';
-import { captureIO, linesOf, makeTempDir, readJsonFile, removeDir } from '../helpers.js';
-
-function configFor(dir: string) {
-  return loadConfig({ DEEPSEEK_API_KEY: 'secret-key-for-test', MINI_AGENT_DATA_DIR: dir });
-}
-
-function todoCall(args: unknown) {
-  return { name: 'todo', arguments: JSON.stringify(args) };
-}
+import {
+  captureIO,
+  linesOf,
+  makeTempDir,
+  readJsonFile,
+  removeDir,
+  testConfig,
+  todoCall,
+} from '../helpers.js';
 
 describe('session todo persistence', () => {
   it('persists todos across runs, appends with an elided subject, and completes by id', async () => {
@@ -24,7 +23,7 @@ describe('session todo persistence', () => {
       const io1 = captureIO();
       await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => first,
         lines: linesOf('记个待办买牛奶'),
@@ -39,7 +38,7 @@ describe('session todo persistence', () => {
       const io2 = captureIO();
       await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => list,
         lines: linesOf('我有哪些待办？'),
@@ -53,7 +52,7 @@ describe('session todo persistence', () => {
       ]);
       await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => third,
         lines: linesOf('再加一个，洗车'),
@@ -66,7 +65,7 @@ describe('session todo persistence', () => {
       ]);
       await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => complete,
         lines: linesOf('把 t1 标成完成'),
@@ -84,7 +83,7 @@ describe('session todo persistence', () => {
       const todosIO = captureIO();
       await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => new FakeLLM([]),
         lines: linesOf('/todos', '/exit'),

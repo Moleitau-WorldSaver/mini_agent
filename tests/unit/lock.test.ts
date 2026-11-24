@@ -34,4 +34,17 @@ describe('session lock', () => {
       await removeDir(dir);
     }
   });
+
+  it('refreshes the lock while held', async () => {
+    const dir = await makeTempDir();
+    try {
+      const release = await acquireLock(dir, 'w1', 150);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      await expect(acquireLock(dir, 'w1', 150)).rejects.toBeInstanceOf(SessionLockError);
+      await release();
+    } finally {
+      await removeDir(dir);
+    }
+  });
 });

@@ -2,19 +2,19 @@ import path from 'node:path';
 import { mkdir, readFile, utimes, writeFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli/run.js';
-import { loadConfig } from '../../src/config.js';
 import { lockFilePath } from '../../src/session/lock.js';
 import { createSession } from '../../src/session/session.js';
 import { saveSession, sessionFilePath } from '../../src/session/store.js';
 import { FakeLLM } from '../fake-llm.js';
-import { captureIO, linesOf, makeTempDir, readJsonFile, readText, removeDir } from '../helpers.js';
-
-function configFor(dir: string) {
-  return loadConfig({
-    DEEPSEEK_API_KEY: 'secret-key-for-test',
-    MINI_AGENT_DATA_DIR: dir,
-  });
-}
+import {
+  captureIO,
+  linesOf,
+  makeTempDir,
+  readJsonFile,
+  readText,
+  removeDir,
+  testConfig,
+} from '../helpers.js';
 
 async function fileExists(file: string): Promise<boolean> {
   return readFile(file).then(
@@ -33,7 +33,7 @@ describe('session safety', () => {
       const io = captureIO();
       const code = await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => new FakeLLM([]),
         lines: linesOf('你好'),
@@ -59,7 +59,7 @@ describe('session safety', () => {
       const io = captureIO();
       const code = await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => fake,
         lines: linesOf('你好'),
@@ -83,7 +83,7 @@ describe('session safety', () => {
       const io = captureIO();
       const code = await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => new FakeLLM([]),
         lines: linesOf('你好'),
@@ -116,7 +116,7 @@ describe('session safety', () => {
       const io = captureIO();
       const code = await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => fake,
         lines: linesOf('继续'),

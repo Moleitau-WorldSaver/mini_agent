@@ -1,6 +1,7 @@
 import { appendFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { RuntimeEvent } from '../runtime/loop.js';
+import { truncateWithMarker } from '../text.js';
 
 const CONTENT_LIMIT = 4000;
 
@@ -22,7 +23,15 @@ export class TraceWriter {
   }
 
   async writeRepair(sessionId: string, repaired: number): Promise<void> {
-    await this.append({ ts: new Date().toISOString(), sessionId, kind: 'repair', repaired });
+    await this.append({
+      ts: new Date().toISOString(),
+      sessionId,
+      turnId: null,
+      step: 0,
+      kind: 'repair',
+      repaired,
+      durationMs: 0,
+    });
   }
 
   private async append(record: Record<string, unknown>): Promise<void> {
@@ -45,8 +54,8 @@ function toRecord(event: RuntimeEvent): Record<string, unknown> {
         request: event.request,
         response: {
           finishReason: event.response.finishReason,
-          content: truncate(event.response.content),
-          reasoningContent: truncate(event.response.reasoningContent),
+          content: truncateNullable(event.response.content),
+          reasoningContent: truncateNullable(event.response.reasoningContent),
           toolCalls: event.response.toolCalls,
         },
         usage: event.response.usage,
@@ -60,7 +69,7 @@ function toRecord(event: RuntimeEvent): Record<string, unknown> {
         tool: event.call.name,
         toolCallId: event.call.id,
         args: parseArguments(event.call.arguments),
-        result: truncate(event.result.content),
+        result: truncateNullable(event.result.content),
         isError: event.result.isError,
         durationMs: event.durationMs,
       };
@@ -69,14 +78,17 @@ function toRecord(event: RuntimeEvent): Record<string, unknown> {
         turnId: event.turnId,
         step: event.step,
         kind: 'error',
+        durationMs: event.durationMs,
         error: event.error,
       };
     case 'turn_end':
       return {
         turnId: event.turnId,
+        step: event.steps,
         kind: 'turn_end',
         steps: event.steps,
         reason: event.reason,
+        durationMs: event.durationMs,
       };
     case 'compression':
       return {
@@ -94,24 +106,19 @@ function toRecord(event: RuntimeEvent): Record<string, unknown> {
         turnId: event.turnId,
         step: event.step,
         kind: 'cancelled',
+        durationMs: event.durationMs,
       };
   }
 }
 
-function truncate(value: string | null): string | null {
-  if (value === null) {
-    return null;
-  }
-  if (value.length <= CONTENT_LIMIT) {
-    return value;
-  }
-  return `${value.slice(0, CONTENT_LIMIT)}…[truncated ${value.length - CONTENT_LIMIT} chars]`;
+function truncateNullable(value: string | null): string | null {
+  return value === null ? null : truncateWithMarker(value, CONTENT_LIMIT);
 }
 
 function parseArguments(raw: string): unknown {
   try {
     return JSON.parse(raw) as unknown;
   } catch {
-    return truncate(raw);
+    return truncateWithMarker(raw, CONTENT_LIMIT);
   }
 }

@@ -78,4 +78,20 @@ describe('DeepSeekAdapter retries', () => {
     expect(calls).toHaveLength(3);
     expect(sleeps).toEqual([1000, 2000]);
   });
+
+  it('aborts during retry backoff', async () => {
+    const controller = new AbortController();
+    const { impl } = fakeFetch([{ status: 500, text: 'boom' }]);
+    const adapter = new DeepSeekAdapter({
+      apiKey: 'k',
+      baseUrl: 'https://example.test',
+      model: 'deepseek-flash',
+      fetchImpl: impl,
+    });
+
+    const promise = adapter.complete({ ...REQUEST, signal: controller.signal });
+    setTimeout(() => controller.abort(), 10);
+
+    await expect(promise).rejects.toMatchObject({ kind: 'aborted', retryable: false });
+  });
 });

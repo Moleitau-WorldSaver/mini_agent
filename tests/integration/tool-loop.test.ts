@@ -70,6 +70,7 @@ describe('tool loop', () => {
 
     expect(result.finishReason).toBe('max_steps');
     expect(result.content).toContain('步数上限');
+    expect(result.content).toContain('calculator');
     expect(session.messages.filter((message) => message.role === 'tool')).toHaveLength(3);
     expect(session.messages.filter((message) => message.role === 'assistant')).toHaveLength(4);
   });

@@ -3,19 +3,15 @@ import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli/run.js';
 import { loadConfig } from '../../src/config.js';
 import { FakeLLM } from '../fake-llm.js';
-import { captureIO, linesOf, makeTempDir, readJsonFile, removeDir } from '../helpers.js';
-
-function configFor(dir: string, extra: NodeJS.ProcessEnv = {}) {
-  return loadConfig({
-    DEEPSEEK_API_KEY: 'secret-key-for-test',
-    MINI_AGENT_DATA_DIR: dir,
-    ...extra,
-  });
-}
-
-function todoCall(args: unknown) {
-  return { name: 'todo', arguments: JSON.stringify(args) };
-}
+import {
+  captureIO,
+  linesOf,
+  makeTempDir,
+  readJsonFile,
+  removeDir,
+  testConfig,
+  todoCall,
+} from '../helpers.js';
 
 describe('multi-session management', () => {
   it('isolates history and todos between sessions', async () => {
@@ -27,7 +23,7 @@ describe('multi-session management', () => {
       ]);
       await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => add,
         lines: linesOf('记个待办买牛奶'),
@@ -40,7 +36,7 @@ describe('multi-session management', () => {
       ]);
       await runCli({
         argv: ['--session', 'w2'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => list,
         lines: linesOf('我有哪些待办？'),
@@ -74,7 +70,7 @@ describe('multi-session management', () => {
         const fake = new FakeLLM([{ kind: 'text', content: answer }]);
         await runCli({
           argv: ['--session', id],
-          config: configFor(dir),
+          config: testConfig(dir),
           system: 'SYS',
           createAdapter: () => fake,
           lines: linesOf(question),
@@ -113,7 +109,7 @@ describe('multi-session management', () => {
       ]);
       await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => seed,
         lines: linesOf('记个待办买牛奶'),
@@ -127,7 +123,7 @@ describe('multi-session management', () => {
       const io = captureIO();
       const code = await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => fake,
         lines: linesOf(
@@ -168,7 +164,7 @@ describe('multi-session management', () => {
       const io = captureIO();
       await runCli({
         argv: ['--session', 'w1'],
-        config: configFor(dir),
+        config: testConfig(dir),
         system: 'SYS',
         createAdapter: () => fake,
         lines: linesOf('/switch ../x', '你好', '/exit'),

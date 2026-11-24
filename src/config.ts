@@ -1,3 +1,6 @@
+export const DEFAULT_CONTEXT_TOKENS = 32768;
+export const DEFAULT_KEEP_RECENT = 8;
+
 export interface Config {
   apiKey: string | null;
   baseUrl: string;
@@ -17,8 +20,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     baseUrl: (env.DEEPSEEK_BASE_URL?.trim() || 'https://api.deepseek.com').replace(/\/+$/, ''),
     model: env.DEEPSEEK_MODEL?.trim() || 'deepseek-flash',
     maxSteps: integer(env.MINI_AGENT_MAX_STEPS, 8, 1),
-    contextTokens: integer(env.MINI_AGENT_CONTEXT_TOKENS, 32768, 1000),
-    keepRecent: integer(env.MINI_AGENT_KEEP_RECENT, 8, 2),
+    contextTokens: integer(env.MINI_AGENT_CONTEXT_TOKENS, DEFAULT_CONTEXT_TOKENS, 1000),
+    keepRecent: integer(env.MINI_AGENT_KEEP_RECENT, DEFAULT_KEEP_RECENT, 2),
     thinking: bool(env.MINI_AGENT_THINKING, true),
     maxTokens: integer(env.MINI_AGENT_MAX_TOKENS, 8192, 256),
     dataDir: env.MINI_AGENT_DATA_DIR?.trim() || 'data',

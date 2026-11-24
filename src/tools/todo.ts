@@ -33,11 +33,11 @@ export const todoTool: ToolDefinition = {
         createdAt: new Date().toISOString(),
       };
       todos.push(item);
-      return ok({ action, item, items: todos });
+      return successResult({ action, item, items: todos });
     }
 
     if (action === 'list') {
-      return ok({ action, items: todos });
+      return successResult({ action, items: todos });
     }
 
     if (!id) {
@@ -48,7 +48,7 @@ export const todoTool: ToolDefinition = {
       throw new Error(`未知待办 id：${id}。当前待办：${formatTodos(todos)}`);
     }
     item.done = true;
-    return ok({ action, item, items: todos });
+    return successResult({ action, item, items: todos });
   },
 };
 
@@ -70,6 +70,6 @@ function formatTodos(todos: TodoItem[]): string {
   return todos.map((todo) => `${todo.id} ${todo.done ? '[x]' : '[ ]'} ${todo.content}`).join('；');
 }
 
-function ok(payload: unknown) {
+function successResult(payload: unknown) {
   return { content: JSON.stringify(payload), isError: false };
 }

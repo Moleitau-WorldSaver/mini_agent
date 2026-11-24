@@ -1,5 +1,6 @@
 import type { ToolExecutor } from '../runtime/loop.js';
 import type { Session, ToolCall, ToolDefinition, ToolResult, ToolSchema } from '../types.js';
+import { truncateWithMarker } from '../text.js';
 import { assertSupportedSchema, validateArgs } from './validator.js';
 
 export class ToolRegistry implements ToolExecutor {
@@ -45,7 +46,7 @@ export class ToolRegistry implements ToolExecutor {
 
     try {
       const result = await tool.execute(args, { session });
-      return { ...result, content: truncateResult(result.content) };
+      return { ...result, content: truncateWithMarker(result.content, RESULT_LIMIT) };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       return errorResult(`工具 ${call.name} 执行失败：${detail}`);
@@ -54,13 +55,6 @@ export class ToolRegistry implements ToolExecutor {
 }
 
 const RESULT_LIMIT = 4000;
-
-function truncateResult(content: string): string {
-  if (content.length <= RESULT_LIMIT) {
-    return content;
-  }
-  return `${content.slice(0, RESULT_LIMIT)}…[truncated ${content.length - RESULT_LIMIT} chars]`;
-}
 
 function errorResult(message: string, hint?: string): ToolResult {
   const payload: Record<string, string> = { error: message };

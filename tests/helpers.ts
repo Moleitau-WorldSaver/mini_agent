@@ -1,9 +1,22 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { loadConfig } from '../src/config.js';
 
 export async function makeTempDir(): Promise<string> {
   return mkdtemp(path.join(tmpdir(), 'mini-agent-test-'));
+}
+
+export function testConfig(dir: string, extra: NodeJS.ProcessEnv = {}) {
+  return loadConfig({
+    DEEPSEEK_API_KEY: 'secret-key-for-test',
+    MINI_AGENT_DATA_DIR: dir,
+    ...extra,
+  });
+}
+
+export function todoCall(args: unknown) {
+  return { name: 'todo', arguments: JSON.stringify(args) };
 }
 
 export async function removeDir(dir: string): Promise<void> {
