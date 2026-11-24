@@ -1,10 +1,12 @@
 import { createInterface } from 'node:readline/promises';
 import type { Config } from '../config.js';
 import type { ModelAdapter } from '../model/adapter.js';
-import { AgentRuntime } from '../runtime/loop.js';
+import { AgentRuntime, type RuntimeEvent } from '../runtime/loop.js';
 import { createSession, isValidSessionId } from '../session/session.js';
 import { loadSession, saveSession } from '../session/store.js';
 import { TraceWriter, traceFilePath } from '../telemetry/trace.js';
+import { createDefaultTools } from '../tools/index.js';
+import { ToolRegistry } from '../tools/registry.js';
 
 export interface CliDeps {
   argv: string[];
@@ -102,6 +104,10 @@ async function runOneShot(
     system: deps.system,
     maxSteps: deps.config.maxSteps,
     maxTokens: deps.config.maxTokens,
+    tools: new ToolRegistry(createDefaultTools()),
+    onEvent: (event) => {
+      printEvent(event, out);
+    },
   });
 
   const result = await runtime.runTurn(session, question);
@@ -140,8 +146,12 @@ async function runReplMode(
     system: deps.system,
     maxSteps: deps.config.maxSteps,
     maxTokens: deps.config.maxTokens,
+    tools: new ToolRegistry(createDefaultTools()),
     onSessionUpdated: (current) => saveSession(deps.config.dataDir, current),
-    onEvent: (event) => trace.write(id, event),
+    onEvent: async (event) => {
+      await trace.write(id, event);
+      printEvent(event, out);
+    },
   });
 
   out(`会话 ${id}（${existing ? '已恢复' : '新建'}）`);
@@ -249,4 +259,25 @@ function readlineSource(): LineSource {
       rl.close();
     },
   };
+}
+
+function printEvent(event: RuntimeEvent, out: (line: string) => void): void {
+  if (event.type !== 'tool') {
+    return;
+  }
+  const args = compactArguments(event.call.arguments);
+  const result = truncateText(event.result.content, 160);
+  out(`[工具] ${event.call.name} ${args} → ${event.result.isError ? '错误：' : ''}${result}`);
+}
+
+function compactArguments(raw: string): string {
+  try {
+    return truncateText(JSON.stringify(JSON.parse(raw) as unknown), 120);
+  } catch {
+    return truncateText(raw, 120);
+  }
+}
+
+function truncateText(value: string, limit: number): string {
+  return value.length <= limit ? value : `${value.slice(0, limit)}…`;
 }
