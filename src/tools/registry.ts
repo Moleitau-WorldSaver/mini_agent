@@ -44,12 +44,22 @@ export class ToolRegistry implements ToolExecutor {
     }
 
     try {
-      return await tool.execute(args, { session });
+      const result = await tool.execute(args, { session });
+      return { ...result, content: truncateResult(result.content) };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       return errorResult(`工具 ${call.name} 执行失败：${detail}`);
     }
   }
+}
+
+const RESULT_LIMIT = 4000;
+
+function truncateResult(content: string): string {
+  if (content.length <= RESULT_LIMIT) {
+    return content;
+  }
+  return `${content.slice(0, RESULT_LIMIT)}…[truncated ${content.length - RESULT_LIMIT} chars]`;
 }
 
 function errorResult(message: string, hint?: string): ToolResult {
