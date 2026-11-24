@@ -3,8 +3,8 @@ import type { Config } from '../config.js';
 import type { ModelAdapter } from '../model/adapter.js';
 import { AgentRuntime, type RuntimeEvent } from '../runtime/loop.js';
 import { TurnCancelledError } from '../runtime/errors.js';
-import { createSession, isValidSessionId } from '../session/session.js';
-import { loadSession, saveSession } from '../session/store.js';
+import { SessionManager, type SessionSummary } from '../session/manager.js';
+import { createSession, isValidSessionId, newSessionId } from '../session/session.js';
 import { TraceWriter, traceFilePath } from '../telemetry/trace.js';
 import { createDefaultTools } from '../tools/index.js';
 import { ToolRegistry } from '../tools/registry.js';
@@ -24,6 +24,7 @@ export const USAGE = [
   '用法：',
   '  agent                          进入交互式会话',
   '  agent --session w1             恢复或新建会话 w1',
+  '  agent --list                   列出会话',
   '  agent "问题"                   单次提问',
   '  agent --verbose "问题"         显示思考过程',
   '  agent --no-compress            关闭上下文压缩',
@@ -34,9 +35,11 @@ export const USAGE = [
 
 export const REPL_HELP = [
   '可用命令：',
-  '  /help    显示帮助',
-  '  /exit    退出（也可用 /quit）',
-  '  /todos   查看当前会话的待办',
+  '  /help          显示帮助',
+  '  /new [id]      新建并切换会话',
+  '  /switch <id>   切换会话',
+  '  /todos         查看当前会话的待办',
+  '  /exit          退出（也可用 /quit）',
   '直接输入文字即可对话。',
 ].join('\n');
 
@@ -44,6 +47,7 @@ interface ParsedArgs {
   help: boolean;
   verbose: boolean;
   noCompress: boolean;
+  listSessions: boolean;
   sessionId?: string;
   question: string;
 }
@@ -54,6 +58,11 @@ interface LineSource {
   next(): Promise<string | null>;
   close(): void;
   onInterrupt?: (handler: () => void) => () => void;
+}
+
+interface ReplContext {
+  session: Session;
+  runtime: AgentRuntime;
 }
 
 export async function runCli(deps: CliDeps): Promise<number> {
@@ -67,20 +76,31 @@ export async function runCli(deps: CliDeps): Promise<number> {
     return 2;
   }
 
-  const { help, verbose, noCompress, sessionId, question } = parsed.args;
+  const { help, verbose, noCompress, listSessions, sessionId, question } = parsed.args;
   if (help) {
     out(USAGE);
     return 0;
   }
 
-  if (!deps.config.apiKey) {
-    err('缺少 DEEPSEEK_API_KEY，请在环境变量中设置后再运行。');
-    return 1;
+  if (listSessions) {
+    const manager = new SessionManager({
+      dataDir: deps.config.dataDir,
+      model: deps.config.model,
+      thinking: deps.config.thinking,
+      onWarning: err,
+    });
+    out(formatSessionList(await manager.list()));
+    return 0;
   }
 
   if (sessionId !== undefined && !isValidSessionId(sessionId)) {
     err(`会话 id 不合法：${sessionId}。只能使用 1–32 位字母、数字、下划线或连字符。`);
     return 2;
+  }
+
+  if (!deps.config.apiKey) {
+    err('缺少 DEEPSEEK_API_KEY，请在环境变量中设置后再运行。');
+    return 1;
   }
 
   try {
@@ -136,39 +156,55 @@ async function runReplMode(
   out: (line: string) => void,
   err: (line: string) => void,
 ): Promise<number> {
-  const id = sessionId ?? newSessionId();
-  const existing = await loadSession(deps.config.dataDir, id);
-  const session =
-    existing ??
-    createSession({
-      id,
-      model: deps.config.model,
-      thinking: deps.config.thinking,
-    });
-
-  if (existing) {
-    if (session.thinking !== deps.config.thinking) {
-      err(`提示：会话 ${id} 记录为思考模式${session.thinking ? '开启' : '关闭'}，沿用会话设置。`);
-    }
-  }
-
-  const trace = new TraceWriter(traceFilePath(deps.config.dataDir, id), (message) => err(message));
-  const runtime = new AgentRuntime(deps.createAdapter(session.model), {
-    system: deps.system,
-    maxSteps: deps.config.maxSteps,
-    maxTokens: deps.config.maxTokens,
-    contextTokens: deps.config.contextTokens,
-    keepRecent: deps.config.keepRecent,
-    compression: !noCompress,
-    tools: new ToolRegistry(createDefaultTools()),
-    onSessionUpdated: (current) => saveSession(deps.config.dataDir, current),
-    onEvent: async (event) => {
-      await trace.write(id, event);
-      printEvent(event, out);
-    },
+  const manager = new SessionManager({
+    dataDir: deps.config.dataDir,
+    model: deps.config.model,
+    thinking: deps.config.thinking,
+    onWarning: err,
   });
 
-  out(`会话 ${id}（${existing ? '已恢复' : '新建'}）`);
+  const opened = await manager.open(sessionId ?? newSessionId());
+  if (!opened.created && opened.session.thinking !== deps.config.thinking) {
+    err(`提示：会话 ${opened.session.id} 记录为思考模式${opened.session.thinking ? '开启' : '关闭'}，沿用会话设置。`);
+  }
+
+  const createContext = (session: Session): ReplContext => {
+    const trace = new TraceWriter(traceFilePath(deps.config.dataDir, session.id), (message) => err(message));
+    const runtime = new AgentRuntime(deps.createAdapter(session.model), {
+      system: deps.system,
+      maxSteps: deps.config.maxSteps,
+      maxTokens: deps.config.maxTokens,
+      contextTokens: deps.config.contextTokens,
+      keepRecent: deps.config.keepRecent,
+      compression: !noCompress,
+      tools: new ToolRegistry(createDefaultTools()),
+      onSessionUpdated: (current) => manager.save(current),
+      onEvent: async (event) => {
+        await trace.write(session.id, event);
+        printEvent(event, out);
+      },
+    });
+    return { session, runtime };
+  };
+
+  let context = createContext(opened.session);
+  out(`会话 ${context.session.id}（${opened.created ? '新建' : '已恢复'}）`);
+
+  const switchTo = async (nextId: string, createNew: boolean): Promise<void> => {
+    if (!isValidSessionId(nextId)) {
+      err(`会话 id 不合法：${nextId}。只能使用 1–32 位字母、数字、下划线或连字符。`);
+      return;
+    }
+    if (createNew) {
+      const session = await manager.create(nextId);
+      context = createContext(session);
+      out(`会话 ${session.id}（新建）`);
+      return;
+    }
+    const target = await manager.open(nextId);
+    context = createContext(target.session);
+    out(`会话 ${target.session.id}（${target.created ? '新建' : '已恢复'}）`);
+  };
 
   const source = deps.lines ? fromAsyncIterable(deps.lines) : readlineSource();
   let activeController: AbortController | null = null;
@@ -198,7 +234,29 @@ async function runReplMode(
         continue;
       }
       if (input === '/todos') {
-        out(formatTodos(session));
+        out(formatTodos(context.session));
+        continue;
+      }
+      if (input === '/new' || input.startsWith('/new ')) {
+        const requested = input.slice('/new'.length).trim() || newSessionId();
+        try {
+          await switchTo(requested, true);
+        } catch (error) {
+          err(`无法新建会话：${error instanceof Error ? error.message : String(error)}`);
+        }
+        continue;
+      }
+      if (input === '/switch' || input.startsWith('/switch ')) {
+        const requested = input.slice('/switch'.length).trim();
+        if (!requested) {
+          err('用法：/switch <会话 id>');
+          continue;
+        }
+        try {
+          await switchTo(requested, false);
+        } catch (error) {
+          err(`无法切换会话：${error instanceof Error ? error.message : String(error)}`);
+        }
         continue;
       }
       if (input.startsWith('/')) {
@@ -209,7 +267,7 @@ async function runReplMode(
       const controller = new AbortController();
       activeController = controller;
       try {
-        const result = await runtime.runTurn(session, input, { signal: controller.signal });
+        const result = await context.runtime.runTurn(context.session, input, { signal: controller.signal });
         if (verbose && result.reasoningContent) {
           err(`[思考] ${result.reasoningContent}`);
         }
@@ -237,6 +295,7 @@ function parseArgs(argv: string[]): ParseResult {
   let help = false;
   let verbose = false;
   let noCompress = false;
+  let listSessions = false;
   let sessionId: string | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -247,6 +306,8 @@ function parseArgs(argv: string[]): ParseResult {
       verbose = true;
     } else if (arg === '--no-compress') {
       noCompress = true;
+    } else if (arg === '--list') {
+      listSessions = true;
     } else if (arg === '--session') {
       const value = argv[index + 1];
       if (!value) {
@@ -263,12 +324,22 @@ function parseArgs(argv: string[]): ParseResult {
     }
   }
 
-  return { ok: true, args: { help, verbose, noCompress, sessionId, question: rest.join(' ').trim() } };
+  return {
+    ok: true,
+    args: { help, verbose, noCompress, listSessions, sessionId, question: rest.join(' ').trim() },
+  };
 }
 
-function newSessionId(now = new Date()): string {
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `s-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+function formatSessionList(items: SessionSummary[]): string {
+  if (items.length === 0) {
+    return '暂无会话。';
+  }
+  return items
+    .map(
+      (item) =>
+        `${item.id} | ${item.title} | ${item.updatedAt} | 消息 ${item.messageCount} | 待办 ${item.todoCount} | 思考 ${item.thinking ? '开' : '关'}`,
+    )
+    .join('\n');
 }
 
 function fromAsyncIterable(lines: AsyncIterable<string>): LineSource {

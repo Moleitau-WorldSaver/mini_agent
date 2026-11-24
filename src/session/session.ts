@@ -8,6 +8,11 @@ export function isValidSessionId(id: string): boolean {
   return SESSION_ID_PATTERN.test(id);
 }
 
+export function newSessionId(now = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `s-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
 export interface CreateSessionOptions {
   id: string;
   model: string;
