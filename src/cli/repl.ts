@@ -7,7 +7,7 @@ import { TraceWriter, traceFilePath } from '../telemetry/trace.js';
 import type { Session } from '../types.js';
 import type { CliDeps } from './deps.js';
 import { REPL_HELP, formatTodos, printToolEvent } from './format.js';
-import { fromAsyncIterable, readlineSource } from './line-source.js';
+import { readlineSource, type LineSource } from './line-source.js';
 import { createRuntime } from './runtime-factory.js';
 
 interface ReplContext {
@@ -21,6 +21,8 @@ export async function runReplMode(
   verbose: boolean,
   noThink: boolean,
   noCompress: boolean,
+  apiKey: string,
+  source: LineSource | undefined,
   out: (line: string) => void,
   err: (line: string) => void,
 ): Promise<number> {
@@ -43,15 +45,21 @@ export async function runReplMode(
 
     const createContext = (session: Session): ReplContext => {
       const trace = new TraceWriter(traceFilePath(deps.config.dataDir, session.id), (message) => err(message));
-      const runtime = createRuntime(deps, session, noCompress, {
-        onSessionUpdated: (current) => manager.save(current),
-        onEvent: async (event) => {
-          await trace.write(session.id, event);
-          if (verbose) {
-            printToolEvent(event, out);
-          }
+      const runtime = createRuntime(
+        deps,
+        session,
+        noCompress,
+        {
+          onSessionUpdated: (current) => manager.save(current),
+          onEvent: async (event) => {
+            await trace.write(session.id, event);
+            if (verbose) {
+              printToolEvent(event, out);
+            }
+          },
         },
-      });
+        apiKey,
+      );
       return { session, runtime };
     };
 
@@ -101,19 +109,19 @@ export async function runReplMode(
       }
     };
 
-    const source = deps.lines ? fromAsyncIterable(deps.lines) : readlineSource();
+    const lineSource = source ?? readlineSource();
     let activeController: AbortController | null = null;
-    const detachInterrupt = source.onInterrupt?.(() => {
+    const detachInterrupt = lineSource.onInterrupt?.(() => {
       if (activeController) {
         activeController.abort();
         return;
       }
-      source.close();
+      lineSource.close();
     });
 
     try {
       while (true) {
-        const line = await source.next();
+        const line = await lineSource.next();
         if (line === null) {
           break;
         }
@@ -181,7 +189,7 @@ export async function runReplMode(
       }
     } finally {
       detachInterrupt?.();
-      source.close();
+      lineSource.close();
     }
 
     return 0;

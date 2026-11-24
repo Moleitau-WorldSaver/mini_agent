@@ -5,7 +5,7 @@ export interface CliDeps {
   argv: string[];
   config: Config;
   system: string;
-  createAdapter: (model: string) => ModelAdapter;
+  createAdapter: (model: string, apiKey: string) => ModelAdapter;
   lines?: AsyncIterable<string>;
   stdout?: (line: string) => void;
   stderr?: (line: string) => void;

@@ -14,8 +14,9 @@ export function createRuntime(
   session: Session,
   noCompress: boolean,
   hooks: RuntimeHooks,
+  apiKey: string,
 ): AgentRuntime {
-  return new AgentRuntime(deps.createAdapter(session.model), {
+  return new AgentRuntime(deps.createAdapter(session.model, apiKey), {
     system: deps.system,
     maxSteps: deps.config.maxSteps,
     maxTokens: deps.config.maxTokens,

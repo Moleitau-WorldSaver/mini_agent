@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli/run.js';
+import { loadConfig } from '../../src/config.js';
 import { TurnCancelledError } from '../../src/runtime/errors.js';
 import { FakeLLM } from '../fake-llm.js';
 import { captureIO, linesOf, makeTempDir, readJsonFile, readText, removeDir, testConfig } from '../helpers.js';
@@ -147,6 +148,35 @@ describe('REPL and session persistence', () => {
       expect(code).toBe(0);
       expect(io.out.join('\n')).toContain('/exit');
       expect(fake.requests).toHaveLength(0);
+    } finally {
+      await removeDir(dir);
+    }
+  });
+
+  it('prompts for a missing key and continues the REPL in the same run', async () => {
+    const dir = await makeTempDir();
+    try {
+      let receivedKey = '';
+      const fake = new FakeLLM([{ kind: 'text', content: '已进入' }]);
+      const io = captureIO();
+
+      const code = await runCli({
+        argv: ['--session', 'w7'],
+        config: loadConfig({ MINI_AGENT_DATA_DIR: dir }),
+        system: 'SYS',
+        createAdapter: (_model, apiKey) => {
+          receivedKey = apiKey;
+          return fake;
+        },
+        lines: linesOf('sk-entered-key', '你好'),
+        ...io,
+      });
+
+      expect(code).toBe(0);
+      expect(receivedKey).toBe('sk-entered-key');
+      expect(io.err.join('\n')).toContain('DEEPSEEK_API_KEY');
+      expect(io.out.join('\n')).toContain('已进入');
+      expect(fake.requests[0]!.messages).toHaveLength(1);
     } finally {
       await removeDir(dir);
     }

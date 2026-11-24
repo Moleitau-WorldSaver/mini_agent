@@ -2,9 +2,11 @@ import { SessionLockError } from '../session/lock.js';
 import { SessionManager } from '../session/manager.js';
 import { createSession, isValidSessionId } from '../session/session.js';
 import { SessionStoreError } from '../session/store.js';
+import { KEY_HELP, readHiddenPrompt } from './api-key.js';
 import { parseArgs, USAGE } from './args.js';
 import type { CliDeps } from './deps.js';
 import { formatSessionList, printToolEvent } from './format.js';
+import { fromAsyncIterable, type LineSource } from './line-source.js';
 import { runReplMode } from './repl.js';
 import { createRuntime } from './runtime-factory.js';
 
@@ -44,16 +46,36 @@ export async function runCli(deps: CliDeps): Promise<number> {
     return 2;
   }
 
-  if (!deps.config.apiKey) {
-    err('缺少 DEEPSEEK_API_KEY，请在环境变量中设置后再运行。');
-    return 1;
+  let apiKey = deps.config.apiKey;
+  let lineSource: LineSource | undefined;
+
+  if (!apiKey) {
+    err(KEY_HELP);
+    let entered: string | null;
+    if (deps.lines) {
+      lineSource = fromAsyncIterable(deps.lines);
+      entered = await lineSource.next();
+    } else {
+      entered = await readHiddenPrompt('DeepSeek API Key: ');
+    }
+    const trimmed = entered?.trim();
+    apiKey = trimmed ? trimmed : null;
+    if (!apiKey) {
+      lineSource?.close();
+      err('未提供密钥，已退出。');
+      return 1;
+    }
   }
 
   try {
     if (question) {
-      return await runOneShot(deps, question, verbose, noThink, noCompress, out, err);
+      lineSource?.close();
+      return await runOneShot(deps, question, verbose, noThink, noCompress, apiKey, out, err);
     }
-    return await runReplMode(deps, sessionId, verbose, noThink, noCompress, out, err);
+    if (!lineSource && deps.lines) {
+      lineSource = fromAsyncIterable(deps.lines);
+    }
+    return await runReplMode(deps, sessionId, verbose, noThink, noCompress, apiKey, lineSource, out, err);
   } catch (error) {
     if (error instanceof SessionLockError) {
       err(error.message);
@@ -74,6 +96,7 @@ async function runOneShot(
   verbose: boolean,
   noThink: boolean,
   noCompress: boolean,
+  apiKey: string,
   out: (line: string) => void,
   err: (line: string) => void,
 ): Promise<number> {
@@ -82,13 +105,19 @@ async function runOneShot(
     model: deps.config.model,
     thinking: deps.config.thinking && !noThink,
   });
-  const runtime = createRuntime(deps, session, noCompress, {
-    onEvent: (event) => {
-      if (verbose) {
-        printToolEvent(event, out);
-      }
+  const runtime = createRuntime(
+    deps,
+    session,
+    noCompress,
+    {
+      onEvent: (event) => {
+        if (verbose) {
+          printToolEvent(event, out);
+        }
+      },
     },
-  });
+    apiKey,
+  );
 
   const result = await runtime.runTurn(session, question);
   if (verbose && result.reasoningContent) {
