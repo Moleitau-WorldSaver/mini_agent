@@ -7,6 +7,7 @@ import { loadSession, saveSession } from '../session/store.js';
 import { TraceWriter, traceFilePath } from '../telemetry/trace.js';
 import { createDefaultTools } from '../tools/index.js';
 import { ToolRegistry } from '../tools/registry.js';
+import type { Session } from '../types.js';
 
 export interface CliDeps {
   argv: string[];
@@ -33,6 +34,7 @@ export const REPL_HELP = [
   '可用命令：',
   '  /help    显示帮助',
   '  /exit    退出（也可用 /quit）',
+  '  /todos   查看当前会话的待办',
   '直接输入文字即可对话。',
 ].join('\n');
 
@@ -174,6 +176,10 @@ async function runReplMode(
         out(REPL_HELP);
         continue;
       }
+      if (input === '/todos') {
+        out(formatTodos(session));
+        continue;
+      }
       if (input.startsWith('/')) {
         out(`未知命令：${input}。输入 /help 查看可用命令。`);
         continue;
@@ -266,6 +272,13 @@ function readlineSource(): LineSource {
       rl.close();
     },
   };
+}
+
+function formatTodos(session: Session): string {
+  if (session.todos.length === 0) {
+    return '当前会话没有待办。';
+  }
+  return session.todos.map((todo) => `${todo.id} [${todo.done ? 'x' : ' '}] ${todo.content}`).join('\n');
 }
 
 function printEvent(event: RuntimeEvent, out: (line: string) => void): void {
