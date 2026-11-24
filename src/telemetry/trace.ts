@@ -18,7 +18,14 @@ export class TraceWriter {
   }
 
   async write(sessionId: string, event: RuntimeEvent): Promise<void> {
-    const record = { ts: new Date().toISOString(), sessionId, ...toRecord(event) };
+    await this.append({ ts: new Date().toISOString(), sessionId, ...toRecord(event) });
+  }
+
+  async writeRepair(sessionId: string, repaired: number): Promise<void> {
+    await this.append({ ts: new Date().toISOString(), sessionId, kind: 'repair', repaired });
+  }
+
+  private async append(record: Record<string, unknown>): Promise<void> {
     try {
       await mkdir(path.dirname(this.filePath), { recursive: true });
       await appendFile(this.filePath, `${JSON.stringify(record)}\n`, 'utf8');

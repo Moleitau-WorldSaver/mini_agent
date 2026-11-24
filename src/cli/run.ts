@@ -3,8 +3,10 @@ import type { Config } from '../config.js';
 import type { ModelAdapter } from '../model/adapter.js';
 import { AgentRuntime, type RuntimeEvent } from '../runtime/loop.js';
 import { TurnCancelledError } from '../runtime/errors.js';
+import { acquireLock, SessionLockError } from '../session/lock.js';
 import { SessionManager, type SessionSummary } from '../session/manager.js';
 import { createSession, isValidSessionId, newSessionId } from '../session/session.js';
+import { SessionStoreError } from '../session/store.js';
 import { TraceWriter, traceFilePath } from '../telemetry/trace.js';
 import { createDefaultTools } from '../tools/index.js';
 import { ToolRegistry } from '../tools/registry.js';
@@ -109,6 +111,14 @@ export async function runCli(deps: CliDeps): Promise<number> {
     }
     return await runReplMode(deps, sessionId, verbose, noCompress, out, err);
   } catch (error) {
+    if (error instanceof SessionLockError) {
+      err(error.message);
+      return 1;
+    }
+    if (error instanceof SessionStoreError) {
+      err(`会话无法载入：${error.message}`);
+      return 1;
+    }
     err(`请求失败：${error instanceof Error ? error.message : String(error)}`);
     return 1;
   }
@@ -163,131 +173,168 @@ async function runReplMode(
     onWarning: err,
   });
 
-  const opened = await manager.open(sessionId ?? newSessionId());
-  if (!opened.created && opened.session.thinking !== deps.config.thinking) {
-    err(`提示：会话 ${opened.session.id} 记录为思考模式${opened.session.thinking ? '开启' : '关闭'}，沿用会话设置。`);
-  }
-
-  const createContext = (session: Session): ReplContext => {
-    const trace = new TraceWriter(traceFilePath(deps.config.dataDir, session.id), (message) => err(message));
-    const runtime = new AgentRuntime(deps.createAdapter(session.model), {
-      system: deps.system,
-      maxSteps: deps.config.maxSteps,
-      maxTokens: deps.config.maxTokens,
-      contextTokens: deps.config.contextTokens,
-      keepRecent: deps.config.keepRecent,
-      compression: !noCompress,
-      tools: new ToolRegistry(createDefaultTools()),
-      onSessionUpdated: (current) => manager.save(current),
-      onEvent: async (event) => {
-        await trace.write(session.id, event);
-        printEvent(event, out);
-      },
-    });
-    return { session, runtime };
-  };
-
-  let context = createContext(opened.session);
-  out(`会话 ${context.session.id}（${opened.created ? '新建' : '已恢复'}）`);
-
-  const switchTo = async (nextId: string, createNew: boolean): Promise<void> => {
-    if (!isValidSessionId(nextId)) {
-      err(`会话 id 不合法：${nextId}。只能使用 1–32 位字母、数字、下划线或连字符。`);
-      return;
-    }
-    if (createNew) {
-      const session = await manager.create(nextId);
-      context = createContext(session);
-      out(`会话 ${session.id}（新建）`);
-      return;
-    }
-    const target = await manager.open(nextId);
-    context = createContext(target.session);
-    out(`会话 ${target.session.id}（${target.created ? '新建' : '已恢复'}）`);
-  };
-
-  const source = deps.lines ? fromAsyncIterable(deps.lines) : readlineSource();
-  let activeController: AbortController | null = null;
-  const detachInterrupt = source.onInterrupt?.(() => {
-    if (activeController) {
-      activeController.abort();
-      return;
-    }
-    source.close();
-  });
+  const id = sessionId ?? newSessionId();
+  let releaseLock = await acquireLock(deps.config.dataDir, id, deps.config.lockStaleMs);
 
   try {
-    while (true) {
-      const line = await source.next();
-      if (line === null) {
-        break;
+    const opened = await manager.open(id);
+    if (!opened.created && opened.session.thinking !== deps.config.thinking) {
+      err(`提示：会话 ${opened.session.id} 记录为思考模式${opened.session.thinking ? '开启' : '关闭'}，沿用会话设置。`);
+    }
+
+    const createContext = (session: Session): ReplContext => {
+      const trace = new TraceWriter(traceFilePath(deps.config.dataDir, session.id), (message) => err(message));
+      const runtime = new AgentRuntime(deps.createAdapter(session.model), {
+        system: deps.system,
+        maxSteps: deps.config.maxSteps,
+        maxTokens: deps.config.maxTokens,
+        contextTokens: deps.config.contextTokens,
+        keepRecent: deps.config.keepRecent,
+        compression: !noCompress,
+        tools: new ToolRegistry(createDefaultTools()),
+        onSessionUpdated: (current) => manager.save(current),
+        onEvent: async (event) => {
+          await trace.write(session.id, event);
+          printEvent(event, out);
+        },
+      });
+      return { session, runtime };
+    };
+
+    let context = createContext(opened.session);
+    out(`会话 ${context.session.id}（${opened.created ? '新建' : '已恢复'}）`);
+    if (opened.repaired > 0) {
+      await new TraceWriter(traceFilePath(deps.config.dataDir, id), (message) => err(message)).writeRepair(
+        id,
+        opened.repaired,
+      );
+      out(`提示：已修复 ${opened.repaired} 处未完成的工具调用。`);
+    }
+
+    const switchTo = async (nextId: string, createNew: boolean): Promise<void> => {
+      if (!isValidSessionId(nextId)) {
+        err(`会话 id 不合法：${nextId}。只能使用 1–32 位字母、数字、下划线或连字符。`);
+        return;
       }
-      const input = line.trim();
-      if (!input) {
-        continue;
+      if (nextId === context.session.id) {
+        out(`已经在会话 ${nextId}。`);
+        return;
       }
-      if (input === '/exit' || input === '/quit') {
-        break;
-      }
-      if (input === '/help') {
-        out(REPL_HELP);
-        continue;
-      }
-      if (input === '/todos') {
-        out(formatTodos(context.session));
-        continue;
-      }
-      if (input === '/new' || input.startsWith('/new ')) {
-        const requested = input.slice('/new'.length).trim() || newSessionId();
-        try {
-          await switchTo(requested, true);
-        } catch (error) {
-          err(`无法新建会话：${error instanceof Error ? error.message : String(error)}`);
+
+      const nextRelease = await acquireLock(deps.config.dataDir, nextId, deps.config.lockStaleMs);
+      let switched = false;
+      try {
+        const target = createNew
+          ? { session: await manager.create(nextId), created: true, repaired: 0 }
+          : await manager.open(nextId);
+
+        await releaseLock();
+        releaseLock = nextRelease;
+        switched = true;
+        context = createContext(target.session);
+
+        if (target.repaired > 0) {
+          await new TraceWriter(traceFilePath(deps.config.dataDir, nextId), (message) => err(message)).writeRepair(
+            nextId,
+            target.repaired,
+          );
+          out(`提示：已修复 ${target.repaired} 处未完成的工具调用。`);
         }
-        continue;
+        out(`会话 ${target.session.id}（${target.created ? '新建' : '已恢复'}）`);
+      } finally {
+        if (!switched) {
+          await nextRelease();
+        }
       }
-      if (input === '/switch' || input.startsWith('/switch ')) {
-        const requested = input.slice('/switch'.length).trim();
-        if (!requested) {
-          err('用法：/switch <会话 id>');
+    };
+
+    const source = deps.lines ? fromAsyncIterable(deps.lines) : readlineSource();
+    let activeController: AbortController | null = null;
+    const detachInterrupt = source.onInterrupt?.(() => {
+      if (activeController) {
+        activeController.abort();
+        return;
+      }
+      source.close();
+    });
+
+    try {
+      while (true) {
+        const line = await source.next();
+        if (line === null) {
+          break;
+        }
+        const input = line.trim();
+        if (!input) {
           continue;
         }
+        if (input === '/exit' || input === '/quit') {
+          break;
+        }
+        if (input === '/help') {
+          out(REPL_HELP);
+          continue;
+        }
+        if (input === '/todos') {
+          out(formatTodos(context.session));
+          continue;
+        }
+        if (input === '/new' || input.startsWith('/new ')) {
+          const requested = input.slice('/new'.length).trim() || newSessionId();
+          try {
+            await switchTo(requested, true);
+          } catch (error) {
+            err(`无法新建会话：${error instanceof Error ? error.message : String(error)}`);
+          }
+          continue;
+        }
+        if (input === '/switch' || input.startsWith('/switch ')) {
+          const requested = input.slice('/switch'.length).trim();
+          if (!requested) {
+            err('用法：/switch <会话 id>');
+            continue;
+          }
+          try {
+            await switchTo(requested, false);
+          } catch (error) {
+            err(`无法切换会话：${error instanceof Error ? error.message : String(error)}`);
+          }
+          continue;
+        }
+        if (input.startsWith('/')) {
+          out(`未知命令：${input}。输入 /help 查看可用命令。`);
+          continue;
+        }
+
+        const controller = new AbortController();
+        activeController = controller;
         try {
-          await switchTo(requested, false);
+          const result = await context.runtime.runTurn(context.session, input, {
+            signal: controller.signal,
+          });
+          if (verbose && result.reasoningContent) {
+            err(`[思考] ${result.reasoningContent}`);
+          }
+          out(`助手> ${result.content}`);
         } catch (error) {
-          err(`无法切换会话：${error instanceof Error ? error.message : String(error)}`);
+          if (error instanceof TurnCancelledError) {
+            err('已取消当前轮次。');
+          } else {
+            err(`请求失败：${error instanceof Error ? error.message : String(error)}`);
+          }
+        } finally {
+          activeController = null;
         }
-        continue;
       }
-      if (input.startsWith('/')) {
-        out(`未知命令：${input}。输入 /help 查看可用命令。`);
-        continue;
-      }
-
-      const controller = new AbortController();
-      activeController = controller;
-      try {
-        const result = await context.runtime.runTurn(context.session, input, { signal: controller.signal });
-        if (verbose && result.reasoningContent) {
-          err(`[思考] ${result.reasoningContent}`);
-        }
-        out(`助手> ${result.content}`);
-      } catch (error) {
-        if (error instanceof TurnCancelledError) {
-          err('已取消当前轮次。');
-        } else {
-          err(`请求失败：${error instanceof Error ? error.message : String(error)}`);
-        }
-      } finally {
-        activeController = null;
-      }
+    } finally {
+      detachInterrupt?.();
+      source.close();
     }
-  } finally {
-    detachInterrupt?.();
-    source.close();
-  }
 
-  return 0;
+    return 0;
+  } finally {
+    await releaseLock();
+  }
 }
 
 function parseArgs(argv: string[]): ParseResult {

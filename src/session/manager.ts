@@ -1,5 +1,6 @@
 import { readdir } from 'node:fs/promises';
 import type { Session } from '../types.js';
+import { repairSession } from './repair.js';
 import { createSession, newSessionId } from './session.js';
 import { loadSession, saveSession, SessionStoreError, sessionsDir } from './store.js';
 
@@ -27,10 +28,14 @@ export class SessionManager {
     this.options = options;
   }
 
-  async open(id: string): Promise<{ session: Session; created: boolean }> {
+  async open(id: string): Promise<{ session: Session; created: boolean; repaired: number }> {
     const existing = await loadSession(this.options.dataDir, id);
     if (existing) {
-      return { session: existing, created: false };
+      const repaired = repairSession(existing);
+      if (repaired > 0) {
+        await saveSession(this.options.dataDir, existing);
+      }
+      return { session: existing, created: false, repaired };
     }
     const session = createSession({
       id,
@@ -38,7 +43,7 @@ export class SessionManager {
       thinking: this.options.thinking,
     });
     await saveSession(this.options.dataDir, session);
-    return { session, created: true };
+    return { session, created: true, repaired: 0 };
   }
 
   async create(id?: string): Promise<Session> {
